@@ -229,6 +229,7 @@ def cmd_write(args):
         from verify_cmds import (
             CONCURRENCY_CATEGORY,
             validate_concurrency_metadata,
+            validate_delivery_field_wording,
             validate_success_criteria,
             validate_verify_cmds,
         )
@@ -236,6 +237,9 @@ def cmd_write(args):
         verify_issues = validate_verify_cmds(verify_command, require_race=require_race)
         verify_issues.extend(validate_concurrency_metadata(clean))
         verify_issues.extend(validate_success_criteria(clean))
+        verify_issues.extend(validate_delivery_field_wording(clean))
+        if prompt_text and prompt_text != user_query:
+            verify_issues.extend(validate_delivery_field_wording({"user_query": prompt_text}))
         if verify_issues:
             print("❌ 收集表硬门禁：" + "；".join(verify_issues))
             sys.exit(1)

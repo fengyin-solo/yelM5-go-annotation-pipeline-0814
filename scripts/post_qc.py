@@ -331,6 +331,7 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     from verify_cmds import (
         CONCURRENCY_CATEGORY,
         validate_concurrency_metadata,
+        validate_delivery_field_wording,
         validate_success_criteria,
         validate_verify_cmds,
     )
@@ -338,6 +339,12 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     verify_issues = validate_verify_cmds(verify_cmds, require_race=require_race)
     verify_issues.extend(validate_concurrency_metadata(coll))
     verify_issues.extend(validate_success_criteria(coll))
+    verify_issues.extend(validate_delivery_field_wording(coll))
+    prompt_file = proj / "prompt.txt"
+    if prompt_file.exists():
+        verify_issues.extend(validate_delivery_field_wording({
+            "user_query": prompt_file.read_text(encoding="utf-8").strip(),
+        }))
     ft = fail_tests(red_out)
     known = project_tests(env_dir) | project_tests(gold_dir)
     unknown = sorted(t for t in ft if t not in known)

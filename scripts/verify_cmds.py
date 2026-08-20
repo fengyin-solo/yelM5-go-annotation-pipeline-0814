@@ -36,6 +36,21 @@ _NON_BUSINESS_WORDS = {
     "verify", "verification", "fix", "fixed", "bugfix", "diagnosis",
 }
 
+_DELIVERY_PROSE_FIELDS = ("bug_id", "user_query", "gold_root_cause", "success_criteria")
+_INTERNAL_CONSTRUCTION_PATTERN = re.compile(
+    r"(?:埋\s*(?:好\s*)?(?:错|bug)|"
+    r"(?:人工|人为|故意)\s*(?:注入|植入|制造)|"
+    r"(?:故障|缺陷)\s*注入|"
+    r"出题(?:环境|代码|过程)|"
+    r"测试模型|出题人|"
+    r"_gold\b|"
+    r"\benv(?:/|\\)|"
+    r"gold\s*(?:修复|答案|补丁|环境|代码)|"
+    r"(?:injected|seeded|synthetic|artificial)[-_ ]*(?:bug|defect)|"
+    r"(?:bug|defect)[-_ ]*(?:injection|seeding))",
+    re.IGNORECASE,
+)
+
 
 def _business_ngrams(text: str, size: int = 4) -> set[str]:
     """提取可用于跨字段核对的中文业务短语，排除纯流程术语。"""
@@ -72,6 +87,22 @@ def validate_success_criteria(collection: dict) -> list[str]:
     task_type = str(collection.get("task_type") or "").strip()
     if task_type == "diagnosis" and not re.search(r"(?:不改|未改|零改动|保持原样|没有改动|无修改)", criteria):
         errors.append("diagnosis 的 success_criteria 必须明确工作区或项目文件零改动")
+    return errors
+
+
+def validate_delivery_field_wording(collection: dict) -> list[str]:
+    """禁止交付字段泄露内部缺陷构造过程。"""
+    errors: list[str] = []
+    for field in _DELIVERY_PROSE_FIELDS:
+        value = str(collection.get(field) or "").strip()
+        if not value:
+            continue
+        match = _INTERNAL_CONSTRUCTION_PATTERN.search(value)
+        if match:
+            errors.append(
+                f"{field} 不得出现内部缺陷构造措辞 {match.group(0)!r}；"
+                "请按程序本身存在的问题来描述"
+            )
     return errors
 
 

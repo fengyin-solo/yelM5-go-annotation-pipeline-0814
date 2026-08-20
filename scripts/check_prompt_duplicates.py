@@ -6,7 +6,8 @@
    是否包含已被判定雷同的模板句（硬红）。
 2. 分别对三条做跨题比对：任意两题的同一字段存在 >= --min-dup 个字符的
    完全相同的连续片段即硬红（verify_cmds 只比较精确测试标识，忽略必需命令骨架）。
-3. 只读，不修改任何文件。
+3. 检查 user_query / success_criteria 是否泄露内部缺陷构造过程。
+4. 只读，不修改任何文件。
 """
 import argparse
 import json
@@ -181,6 +182,25 @@ def check_forbidden_chars(records):
     return bad
 
 
+def check_internal_construction(records):
+    """检查交付文案是否把程序故障写成了人为构造的缺陷。"""
+    from verify_cmds import validate_delivery_field_wording
+
+    bad = []
+    for record in records:
+        for item in record["texts"]:
+            issues = validate_delivery_field_wording({item["field"]: item["text"]})
+            for issue in issues:
+                bad.append({
+                    "id": record["id"],
+                    "field": item["field"],
+                    "issue": issue,
+                    "source": item["source"],
+                    "path": item["path"],
+                })
+    return bad
+
+
 def find_duplicates(records, min_dup):
     """对四个字段分别做两两最长公共块比对。"""
     from difflib import SequenceMatcher
@@ -235,9 +255,10 @@ def main():
     banned = check_banned(records)
     dups = find_duplicates(records, args.min_dup)
     forbidden = check_forbidden_chars(records)
+    internal = check_internal_construction(records)
 
-    if not banned and not dups and not forbidden:
-        print("去重自检通过：三条文案均未发现被禁模板句、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
+    if not banned and not dups and not forbidden and not internal:
+        print("去重自检通过：三条文案均未发现被禁模板句、内部构造措辞、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
         return 0
 
     if banned:
@@ -249,6 +270,11 @@ def main():
         print("\n[硬红] 出现生僻/序号字符（①②③… 等），必须改成普通写法（如 1. 2. 3. 或 ；分隔）：")
         for item in forbidden:
             print("  - {id}/{field} ({source}): {chars!r}\n    {path}".format(**item))
+
+    if internal:
+        print("\n[硬红] 交付文案泄露内部缺陷构造过程，必须改成程序本身存在问题的叙事：")
+        for item in internal:
+            print("  - {id}/{field} ({source}): {issue}\n    {path}".format(**item))
 
     if dups:
         print("\n[硬红] 任意两题的同一字段存在 >= {} 字连续重复片段:".format(args.min_dup))

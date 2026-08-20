@@ -48,3 +48,4 @@
 2026-08-20 收集表彻底删除 gold_patch 列，由 22 列改为 21 列；GitHub publish 只创建 bug-<record> 分支并输出 repoUrl，不再创建远程 gold 分支；本地 _gold 保留用于红绿校准、难度检查、Docker 和 post_qc；正式修复轨迹、绿灯证据与 push-fix 流程保持不变
 2026-08-20 skill 名称与目录增加 yelM5- 前缀，并初始化独立 Git 仓库用于后续持续推送
 2026-08-20 success_criteria 业务场景硬门禁：按 bugfix/diagnosis 分开生成，必须复用 user_query 中至少一个 4 字以上业务短语并写清具体异常与后续影响；collection_table.py 与 post_qc.py 拦截空泛流程描述
+2026-08-20 交付字段真实故障叙事：bug_id/user_query/gold_root_cause/success_criteria/prompt 禁止出现埋错、人工注入、出题环境、_gold 等内部构造痕迹；success_criteria 统一改写为问题存在时/修复后

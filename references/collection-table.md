@@ -23,8 +23,8 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 | user_query | 纯文本、简短口语化、高中生语言的**纯提示词**：现象 + 人味化废话 + 环境交代 + 任务指令；**不写任何验收/复现/运行命令、不贴命令代码块**（`verify_cmds` 独立维护）；确需展示症状代码时最小复现 ≤3 行；bugfix 明确写「帮我修好」，diagnosis 明确写「先别改代码」；不出现根因/原因，不用「不是...而是...」等 AI 词 |
 | trajectory | 腾讯 COS 上传链接；本地 `<session_id>.jsonl` 作为附件一并交付（必须是 Claude Code 自己落盘的原始 session 轨迹文件，不是 stdout 捕获拼装的文件） |
 | verify_cmds | **bugfix / diagnosis 都必填**：只写一条目标 Bug 定向复现命令，明确唯一目标包、精确测试名和 `-count=1`，如 `go test ./path/to/pkg -run '^TestTargetBug$' -count=1`（并发加 `-race`）；禁止 `go test ./...`、通配包、当前目录、多包、多测试及拼接回归命令。目标测试必须完整覆盖 `user_query` 描述的全部现象与触发条件；红/绿证据轨迹必须各自只实际执行一次这条命令，实际 Bash 调用、最终回复【命令】与正式填表值逐字符一致，空格、引号、路径和参数顺序也不得变化；bugfix 校验红+绿，diagnosis 校验红 |
-| gold_root_cause | **diagnosis 必填**：紧凑三项式 `文件: ... 符号: ... 机制: ...`，每项附可复核位置；bugfix 也建议填（供排查阶段 QC） |
-| success_criteria | **必须是本条数据专属的业务验收摘要**，并原样复用 `user_query` 中至少一个 4 字以上业务短语。bugfix 写「具体业务触发在埋错态 20/20 出现的异常、修复态 20/20 恢复的公开行为、回退后重新出现的业务现象、全量回归」；diagnosis 写「具体业务触发 20/20 出现的异常、输入/接口值到恢复路径再到后续影响的定位链、工作区零改动」。禁止只写代码状态、定向命令、稳定变红、定位文件符号、公开现象、真实复现等通用流程描述；只写真实验收事实，不解释未验证的根因，不用「不是...而是...」等 AI 词 |
+| gold_root_cause | **diagnosis 必填**：紧凑三项式 `文件: ... 符号: ... 机制: ...`，每项附可复核位置；bugfix 也建议填（供排查阶段 QC）。只描述程序现有故障，不写缺陷构造过程、内部环境或 `_gold` |
+| success_criteria | **必须是本条数据专属的业务验收摘要**，并原样复用 `user_query` 中至少一个 4 字以上业务短语。bugfix 写「具体业务触发在问题存在时 20/20 出现的异常、修复后 20/20 恢复的公开行为、回退后重新出现的业务现象、全量回归」；diagnosis 写「具体业务触发 20/20 出现的异常、输入/接口值到恢复路径再到后续影响的定位链、工作区零改动」。禁止只写代码状态、定向命令、稳定变红、定位文件符号、公开现象、真实复现等通用流程描述；禁止出现埋错、人工注入、出题环境、`_gold` 等内部构造痕迹；只写真实验收事实，不解释未验证的根因，不用「不是...而是...」等 AI 词 |
 | verify_result | 红/绿证据轨迹自动回填的 JSON（上传后由 `run_evidence_trajectories.py generate` 写入）；**bugfix**：`pre_fix`+`post_fix`；**diagnosis**：仅 `pre_fix`。每项含 `trajectory_url` / `session_id` / `result` |
 | harness | 生成轨迹的工具名 + 版本号，如 `Claude Code CLI v2.1.233`；禁止只写 `Claude Code CLI` 或只写模型名 |
 | generator_model | 实际生成轨迹的模型标识 |
@@ -37,6 +37,8 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 ## 自建 0-1 项目填表要点
 
 > **必填对照（红线）**：bugfix 必填 `verify_cmds` + `verify_result`（`pre_fix`+`post_fix`）；diagnosis 必填 `verify_cmds` + `gold_root_cause` + `verify_result`（仅 `pre_fix`）。
+
+- **交付字段统一采用真实故障叙事**：`bug_id`、`user_query`、`gold_root_cause`、`success_criteria` 只描述程序原本存在的问题及其验证结果，不得出现“埋错 / 埋 bug / 人工注入 / 故障注入 / 出题环境 / `_gold` / gold 修复”等内部流程措辞。红灯阶段写“问题存在时 / 修复前 / 当前代码中”，不得写“埋错态 / 埋错环境”。
 
 - `repo_url`：填 `bug-<record>` 分支地址；bugfix 题在跑完轨迹并质检后把测试模型修复 commit 推到该分支（分支地址不变，HEAD 变为测试模型 fix），diagnosis 题保持 bug 分支不动。
 - 当前 Codex 完成的正确修复只保存在本地 `_gold/`，用于红绿校准、难度检查和回归验证，不创建远程分支、不进入收集表。
