@@ -328,10 +328,16 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
             results.append(("diagnosis", False, "缺 .base_snapshot"))
 
     # 9. coverage：命令形态合规，且红灯失败测试能在项目测试中找到
-    from verify_cmds import CONCURRENCY_CATEGORY, validate_concurrency_metadata, validate_verify_cmds
+    from verify_cmds import (
+        CONCURRENCY_CATEGORY,
+        validate_concurrency_metadata,
+        validate_success_criteria,
+        validate_verify_cmds,
+    )
     require_race = str(coll.get("bug_category") or "").strip() == CONCURRENCY_CATEGORY
     verify_issues = validate_verify_cmds(verify_cmds, require_race=require_race)
     verify_issues.extend(validate_concurrency_metadata(coll))
+    verify_issues.extend(validate_success_criteria(coll))
     ft = fail_tests(red_out)
     known = project_tests(env_dir) | project_tests(gold_dir)
     unknown = sorted(t for t in ft if t not in known)

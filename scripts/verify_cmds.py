@@ -19,6 +19,61 @@ _DETERMINISM_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+_GENERIC_SUCCESS_CRITERIA_PHRASES = (
+    "出问题的代码状态下定向命令稳定变红",
+    "定位结论说清文件、符号和现象链路",
+    "全程不改项目文件，只看公开现象和真实复现",
+)
+
+_NON_BUSINESS_PHRASES = (
+    "项目代码文件工作区当前目录代码状态定向命令测试用例验证验收复现运行执行",
+    "修复修完改完修改回退回归全量基线红灯绿灯变红全绿通过失败稳定二十遍",
+    "公开行为公开现象真实复现定位结论文件符号现象链路原因根因机制保持原样零改动不改代码",
+)
+
+_NON_BUSINESS_WORDS = {
+    "test", "tests", "code", "project", "file", "files", "workspace",
+    "verify", "verification", "fix", "fixed", "bugfix", "diagnosis",
+}
+
+
+def _business_ngrams(text: str, size: int = 4) -> set[str]:
+    """提取可用于跨字段核对的中文业务短语，排除纯流程术语。"""
+    out: set[str] = set()
+    for run in re.findall(r"[\u3400-\u9fff]+", str(text or "")):
+        for index in range(0, len(run) - size + 1):
+            gram = run[index:index + size]
+            if not any(gram in phrase for phrase in _NON_BUSINESS_PHRASES):
+                out.add(gram)
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", str(text or "")):
+        lowered = word.lower()
+        if lowered not in _NON_BUSINESS_WORDS:
+            out.add(lowered)
+    return out
+
+
+def validate_success_criteria(collection: dict) -> list[str]:
+    """校验 success_criteria 是否锚定本条 user_query 的业务场景。"""
+    criteria = str(collection.get("success_criteria") or "").strip()
+    query = str(collection.get("user_query") or "").strip()
+    if not criteria:
+        return ["success_criteria 为空"]
+
+    errors: list[str] = []
+    compact = re.sub(r"\s+", "", criteria)
+    matched_generic = [phrase for phrase in _GENERIC_SUCCESS_CRITERIA_PHRASES if phrase in compact]
+    if matched_generic:
+        errors.append("success_criteria 命中空泛流程描述：" + "、".join(matched_generic))
+
+    shared = _business_ngrams(query) & _business_ngrams(criteria)
+    if not shared:
+        errors.append("success_criteria 必须原样复用 user_query 中至少一个 4 字以上业务短语，并写明该场景的具体异常或后续影响")
+
+    task_type = str(collection.get("task_type") or "").strip()
+    if task_type == "diagnosis" and not re.search(r"(?:不改|未改|零改动|保持原样|没有改动|无修改)", criteria):
+        errors.append("diagnosis 的 success_criteria 必须明确工作区或项目文件零改动")
+    return errors
+
 
 def validate_verify_cmds(command: str, require_race: bool = False) -> list[str]:
     command = command or ""

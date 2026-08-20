@@ -226,12 +226,18 @@ def cmd_write(args):
         print("❌ harness 必须写明生成轨迹的工具名 + 版本号，例如 Claude Code CLI v2.1.233")
         sys.exit(1)
     if task_type in ("bugfix", "diagnosis"):
-        from verify_cmds import CONCURRENCY_CATEGORY, validate_concurrency_metadata, validate_verify_cmds
+        from verify_cmds import (
+            CONCURRENCY_CATEGORY,
+            validate_concurrency_metadata,
+            validate_success_criteria,
+            validate_verify_cmds,
+        )
         require_race = str(clean.get("bug_category") or "").strip() == CONCURRENCY_CATEGORY
         verify_issues = validate_verify_cmds(verify_command, require_race=require_race)
         verify_issues.extend(validate_concurrency_metadata(clean))
+        verify_issues.extend(validate_success_criteria(clean))
         if verify_issues:
-            print("❌ verify_cmds 硬门禁：" + "；".join(verify_issues))
+            print("❌ 收集表硬门禁：" + "；".join(verify_issues))
             sys.exit(1)
     elif task_type:
         print("❌ task_type 只能是 bugfix 或 diagnosis")

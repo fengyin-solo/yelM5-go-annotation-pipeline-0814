@@ -24,7 +24,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 | trajectory | 腾讯 COS 上传链接；本地 `<session_id>.jsonl` 作为附件一并交付（必须是 Claude Code 自己落盘的原始 session 轨迹文件，不是 stdout 捕获拼装的文件） |
 | verify_cmds | **bugfix / diagnosis 都必填**：只写一条目标 Bug 定向复现命令，明确唯一目标包、精确测试名和 `-count=1`，如 `go test ./path/to/pkg -run '^TestTargetBug$' -count=1`（并发加 `-race`）；禁止 `go test ./...`、通配包、当前目录、多包、多测试及拼接回归命令。目标测试必须完整覆盖 `user_query` 描述的全部现象与触发条件；红/绿证据轨迹必须各自只实际执行一次这条命令，实际 Bash 调用、最终回复【命令】与正式填表值逐字符一致，空格、引号、路径和参数顺序也不得变化；bugfix 校验红+绿，diagnosis 校验红 |
 | gold_root_cause | **diagnosis 必填**：紧凑三项式 `文件: ... 符号: ... 机制: ...`，每项附可复核位置；bugfix 也建议填（供排查阶段 QC） |
-| success_criteria | 编号式：基线 20 红 / 修复后 20 绿 / 回退再红 / 全量无回归 / 只验证公开行为；高中生口语，只写红绿事实，不解释根因，不用「不是...而是...」等 AI 词 |
+| success_criteria | **必须是本条数据专属的业务验收摘要**，并原样复用 `user_query` 中至少一个 4 字以上业务短语。bugfix 写「具体业务触发在埋错态 20/20 出现的异常、修复态 20/20 恢复的公开行为、回退后重新出现的业务现象、全量回归」；diagnosis 写「具体业务触发 20/20 出现的异常、输入/接口值到恢复路径再到后续影响的定位链、工作区零改动」。禁止只写代码状态、定向命令、稳定变红、定位文件符号、公开现象、真实复现等通用流程描述；只写真实验收事实，不解释未验证的根因，不用「不是...而是...」等 AI 词 |
 | verify_result | 红/绿证据轨迹自动回填的 JSON（上传后由 `run_evidence_trajectories.py generate` 写入）；**bugfix**：`pre_fix`+`post_fix`；**diagnosis**：仅 `pre_fix`。每项含 `trajectory_url` / `session_id` / `result` |
 | harness | 生成轨迹的工具名 + 版本号，如 `Claude Code CLI v2.1.233`；禁止只写 `Claude Code CLI` 或只写模型名 |
 | generator_model | 实际生成轨迹的模型标识 |
