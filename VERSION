@@ -1,0 +1,49 @@
+2026-08-14 Docker 版（从 go-annotation-pipeline 复制，原版未动；题面风格已收紧为简短口语化）
+2026-08-14 增加 source=github|local（本地自建/埋错）；local：一项目最多 3 条、gold_patch 留空；新增 workspace/repo_registry 的 --source/local 支持
+2026-08-14 local 模式加固：埋错按 bug_category 选难点、埋错自检 20 次全红、质检 20 次全绿；gold 答案私有区 _gold/、题面症状化；local 一项目最多 3 条并支持 --count 3 直接做 3 道
+2026-08-14 题面任务指令显式化：bugfix=「请修复 xxx/帮我修好 xxx」，diagnosis=「不要修改代码帮我定位 xxx/文件先不要改帮我查根因」（写入 SKILL 第3步 + rules + collection-table）
+2026-08-15 0-1 自建项目版：去掉 GitHub 选题；repo 最多 5 条；repo_url=bug base commit，gold_patch=本流程模型 gold 修复；GitHub commit 交付（不 zip/不截图）；Docker 双架构配置、仅验证本机；新收集表 22 列（repo_url + 是否同步飞书）
+2026-08-15 增加 BUG_REPRO.md 交付规则：只记录 Bug/触发/错误信息，放在 <project>/BUG_REPRO.md，不进 env；github_project 交付三件套改为 benzhi.Dockerfile + build_benzhi_docker.sh + BENZHI_README.md
+2026-08-15 加固单轮轨迹：只允许一条用户输入，禁止任何斜杠命令（/model /status 等）；run_trajectory.check_success 与 analyze_trajectory 自动检测
+2026-08-15 跑轨迹防泄露：env/prompt 不得出现 SKILL.md/AGENTS.md/CLAUDE.md/.claude/BUG_REPRO.md 或 gold_patch/repo_url/技能名；workspace 复制时排除技能文件，run_trajectory 跑前自动拦截
+2026-08-15 埋错复杂度红线：bugfix 的 gold 修复必须「改动 >3 文件 或 >50 行功能代码」二者至少其一；禁止单字符/单行/单文件简单埋错；新增复杂埋错设计方法 + 自检清单 + diff 测量命令
+2026-08-15 实战经验：组合型缺陷(4文件)埋法、buggy 必须可编译、修复规模在 bug/gold 分支上量、diagnosis 专用复现测试、SOURCE.txt 不进交付分支
+2026-08-15 repo_url 口径改为「test_bug_fix-<bug_id> 分支地址」（tree/...）；bug 分支由 bug-<id> 改为 test_bug_fix-<id>；gold_patch 仍为 gold-<id> 的修复 commit
+2026-08-15 repo_url 口径固化：repo_url=test_bug_fix-<bug_id> 分支地址（/tree/...），gold_patch=gold-<bug_id> 修复 commit；已全局替换残留的 bug-<bug_id> 写法
+2026-08-15 不再生成 _gold/<record>/SOURCE.txt（workspace.py 移除该逻辑；sync_worktree 仍兜底排除 SOURCE.txt）
+2026-08-15 GitHub repo 名自动追加 4 位随机码（<repo_name>-XXXX）避免重名；映射存 _repos/_name_map.json，publish 自动解析
+2026-08-15 新增 scripts/configure.py 首次配置向导（check/setup/show/reset-registry）；GitHub 凭据写入 ~/.codex/pg-code/github-context.json，COS cookie/claude 写入 ~/.codex/go-annotation-pipeline/config.json；upload_trajectory.py 自动读取本地 COS cookie 与 cos_base_url，run_trajectory.py 自动读取 claude_bin；SKILL.md 新增「首次配置」章节并移除硬编码 COS 账号密码；新增 SETUP.md 分享与安装说明
+2026-08-16 项目/仓库命名具体化：禁用 forex/task 等泛化名；GitHub 随机码可预写 _repos/_name_map.json 固定为具体仓库名；收集表 user_query/success_criteria/verify_result/verify_cmds 四条文案强制逐条差异化
+2026-08-16 GitHub 仓库名直接用真实项目名（去 go- 前缀、去随机码、不含 test/fix）；分支改为短名 bug-<record> / gold-<record>（record=001…005）
+2026-08-16 仓库名进一步要求「尽量长」：用领域+用途+类型拼成描述性长名（如 renovation-budget-expense-management-service），避免重名（仍不带 go- 前缀/随机码/test/fix）
+2026-08-16 仓库名长度定为 3-5 个英文单词（领域+用途+类型），示例 renovation-budget-expense-service（仍不带 go- 前缀/随机码/test/fix）
+
+
+2026-08-16 修复题面雷同：SKILL.md 取消固定人味句/环境句，改句式池+逐条错开；新增 scripts/check_prompt_duplicates.py 强制自检（被禁模板句 + 跨题 >=12 字连续重复片段）；rules.md 同步禁句清单
+
+2026-08-17 新增 scripts/run_evidence_trajectories.py：一条命令生成并上传红灯/绿灯/gold 三条证据轨迹；红灯绿灯用 Claude Code（目标模型），gold 用 Codex 当前模型
+2026-08-17 加固交付文件位置：benzhi.Dockerfile、build_benzhi_docker.sh、BENZHI_README.md 强制且仅能位于 GitHub 仓库根目录；嵌套 Go 模块仍以仓库根目录为 Docker 构建上下文，发布前自动清理旧版子目录副本并校验。
+2026-08-17 证据轨迹改版：去掉 gold 修复轨迹，只保留红/绿两条；红/绿用目标模型验证并上传 COS，生成 pre_fix/post_fix JSON 回填 collection.json 的 verify_result；新增统一红/绿验收标准（不达标回滚重新埋错/重新修复）与 JSON 校验（结构/result 值/URL 可访问/session_id 匹配）；red/green/修复共用全局串行锁，避免测试模型限流并发。
+2026-08-17 diagnosis 证据轨迹精简：diagnosis 只产红灯（仅 pre_fix，不出现 post_fix），bugfix 仍为 pre_fix+post_fix；run_evidence_trajectories.py 按 task_type 自动选择，validate 同步按 task_type 校验；红灯复现命令支持 --verify-cmds 覆盖。
+2026-08-17 修复 8.1 交付文件误删缺陷：新增 github_project.py push-fix 子命令替代手动 rsync（手动 --delete 会把根目录 benzhi 交付三件套与 .dockerignore 一并删掉再提交）；push-fix 自动同步 env/、重建并校验根目录交付文件、拒绝 diagnosis 题与零差异提交；SKILL.md 8.1 改为脚本命令
+2026-08-17 埋错复杂度测量提前到本地：改动规模测量首选 git diff --no-index 对比 env/ 与 _gold/（发布前即可判定，避免不达标连累题面与校准返工），发布后分支 diff 改为复核；新增 references/bug-patterns.md 深度埋错模式库（P1-P8，覆盖 7 类 bug_category，均为多文件协同失效）与 scripts/pick_bug_pattern.py 随机抽取（--category/--exclude/--list，同 repo 不重复模式）；SKILL.md 第 3 步与 rules.md 同步
+2026-08-17 注册表迁出技能目录：全局已用仓库清单唯一事实源改为 ~/.codex/go-annotation-pipeline/used-repositories.json（个人目录，升级/分享技能不再丢账、不再带账）；repo_registry.py 首次运行自动迁移旧记录（合并去重、重复取较大 uses、原文件保留 *.migrated 备份）；configure.py reset-registry 改为清空个人目录清单并备份旧位置文件；SKILL/README/SETUP 同步，分享前清空步骤取消
+2026-08-17 清理改版残留：删除已弃用的 scripts/fetch_candidates.py 与 references/hot-repos-blocklist.md（GitHub 选题时代产物）；rules.md「验证口径红线」必填对照补齐 verify_result 与新口径一致；BUG_REPRO.md 适用范围统一为「每条记录都写」（删除旧版「初始代码含 Bug/干净基线」二分，SKILL/rules/collection-table/github_project.py 提示语同步）
+2026-08-17 流程总览与正文章节编号对齐：总览改为 1-9 步一一对应正文标题（补入第 2 步创建记录 workspace），红/绿证据轨迹标注为第 8、9 步之间执行的附录
+2026-08-17 第 4 步题面写作补执行顺序说明：先定验收命令（=verify_cmds 内容）再写题面，消除与第 5 步的产出顺序循环；补 diagnosis 题面验收命令口径（题面给复现命令供模型复现，收集表 verify_cmds 仍留空，红灯证据用 --verify-cmds 传入）
+2026-08-17 frontmatter description 压缩：只保留「是什么/何时触发/首次配置入口」三要素（约 400 字减至约 130 字），交付口径、分支规则、Docker 要求等细节全部由正文「核心口径」承载，减少每次会话的技能列表上下文占用并提高触发匹配信号密度
+2026-08-17 交付轨迹改为 Claude Code 原始 session 文件（红线）：修复轨迹、红灯、绿灯三条均直接取 ~/.claude/projects/<目录>/<session_id>.jsonl 原始落盘文件交付，不再用 stdout 捕获拼装的 stream-json；run_trajectory.py 新增 find_native_transcript 并在成功后自动取出保存为 <session_id>.jsonl（stream 捕获另存 *.stream.jsonl 仅作运行校验），run_evidence_trajectories.py 红/绿同样取原始文件、session 提取器兼容原始格式 sessionId 字段；SKILL/rules/collection-table 同步「三处一致」口径改为轨迹内 sessionId
+2026-08-17 绿灯证据轨迹语义修正：post_fix 验证对象改为修复轨迹改好的 env/（测试模型自己的修复成果），不再验证 _gold（gold 有效性由第 5 步红绿校准保证）；generate 新增守卫（env 与埋错基线零差异即拒绝，防止在未修复环境上出绿灯）；绿灯不达标含义改为「修复轨迹实际无效，回滚重跑第 7 步并重新质检」；证据环节因此必须在修复轨迹+质检之后执行；SKILL 附录/rules 同步
+2026-08-17 证据轨迹拆为两阶段并调整执行顺序：红灯改为第 6→7 步之间的开考门禁（generate --phase red，跑修复轨迹前由测试模型实测确认 bug 可复现；不过=埋错不合格回滚重埋，不得开跑轨迹，基线快照不存在时自动从未跑轨迹的 env 生成）；绿灯为第 8 步质检后的验收（--phase green，跑在测试模型修复后的 env 上）；--phase auto 按红灯结果自动选择；红灯中间结果存 _evidence/red_result.json 供绿灯阶段回填；SKILL 总览/第 7 步/附录、rules.md 同步
+2026-08-17 失败轮次隔离 + push-fix 顺序修正：run_trajectory.py 重跑前自动把上一轮主轨迹/trajectory 临时文件/绿灯产物归档到 <project>/_failed_rounds/<时间戳>-rerun/（红灯证据与基线快照仍有效保留原位，绿灯工作目录清理）；红灯/绿灯重跑同样各自归档（-red-retry/-green-retry），红灯重跑按当前 env 重建基线快照并带防呆（疑似已跑轨迹时拒绝）；执行顺序调整为「四查 → 绿灯验收 → 8.1 push-fix」，只有绿灯确认过的修复才推上 GitHub，避免无效修复 commit 进交付分支；SKILL/rules 同步
+2026-08-17 题面写作指引重写（防雷同/去 AI 味/简洁）：改为「先定人设再动笔」驱动差异，删除人味句/环境句示例池（旧示例句全部加入 check_prompt_duplicates.py 禁句清单硬拦）；信息要素保持齐全但写法自由（顺序可乱/要素可合并/详略可变，40-150 字、2-5 短句、长短拉开）；简洁红线加「默认不贴源码、报错只贴一行、题面不排版」；结构性雷同（同骨架换词）明确列为红线；rules.md 同步
+2026-08-17 二轮加固（三处）：1) 修复基线快照覆盖 bug——run_trajectory.py 重跑时不再无条件用当前 env 重建 .base_snapshot（重跑时 env 含上一轮模型改动，覆盖会把污染代码拍成基线、真基线永久丢失且回滚失效），已有快照一律复用；2) 红灯门禁硬化——run_trajectory.py run 缺 _evidence/red_result.json 即拒绝开跑（--skip-red-gate 逃生口）；3) 绿灯门禁硬化——github_project.py push-fix 缺 verify_green.jsonl/verify_result.json 即拒绝推送（--force 逃生口）；四项冒烟测试通过，SKILL 同步
+2026-08-17 publish 补显式交付文件校验：cmd_publish 的 bug/gold 两个分支在 commit 前都显式执行 _assert_root_delivery_files（此前依赖 ensure_delivery_files 内部校验，其 go.mod 缺失早退路径会跳过校验，存在发布缺三件套分支的缝隙）；与 push-fix 的校验对称
+2026-08-17 ✅ 终版定稿：清理 __pycache__ 与注册表迁移备份文件，全部 13 个脚本编译通过；本目录（~/.codex/skills/最新-go-annotation-pipeline-0814）即 Codex 安装位置
+2026-08-18 user_query 改为纯提示词：题面不写任何验收/复现/运行命令、不贴命令代码块；verify_cmds 独立于 user_query（只进 collection.json，不写进题面）；题面写作指引加详（现象/背景/环境/任务指令四要素 + 纯提示词红线 + 人设/结构差异化细节）；SKILL.md/rules.md/collection-table.md 同步
+2026-08-19 难度门禁升级：4 文件/20 行降为必要但不充分条件，核心缺陷强制主运行时机制 + 不同耦合机制、至少 3 层和时序/生命周期触发；user_query 强制至少 2 步触发、2 个关联症状和正确预期；模式库由 P1-P8 扩到 P1-P12并重写单点风险模式；新增 difficulty_review.json 与 difficulty_review.py，post_qc 增加第 10 项难度审查和至少 4 个修复文件逐一回退再红证据。
+2026-08-19 收集表与证据命令口径修正：harness 必须填写生成轨迹的工具名 + 版本号；diagnosis 的 verify_cmds 也改为必填；verify_cmds 必须与红灯证据轨迹最终回复【命令】逐字一致，bugfix 还必须与绿灯证据轨迹逐字一致。collection_table.py、run_evidence_trajectories.py、post_qc.py 同步加硬校验。
+2026-08-19 user_query 验收指令硬拦截：题面除禁止具体命令外，也不得要求运行、执行、重跑、验证或复现测试；collection_table.py 写入 collection.json 时同时检查 user_query 与 prompt.txt，命中即拒绝落盘。
+2026-08-19 红绿命令逐字符门禁：红/绿证据轨迹各只允许一次实际 Bash 调用，命令必须与 collection.json 的 verify_cmds 及最终回复【命令】逐字符完全一致；运行期检查 stdout 与原始 session，post_qc 复查交付原始轨迹；verify_cmds 首尾空白也拒绝。
+2026-08-20 收集表彻底删除 gold_patch 列，由 22 列改为 21 列；GitHub publish 只创建 bug-<record> 分支并输出 repoUrl，不再创建远程 gold 分支；本地 _gold 保留用于红绿校准、难度检查、Docker 和 post_qc；正式修复轨迹、绿灯证据与 push-fix 流程保持不变
+2026-08-20 skill 名称与目录增加 yelM5- 前缀，并初始化独立 Git 仓库用于后续持续推送

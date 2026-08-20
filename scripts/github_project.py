@@ -1,0 +1,547 @@
+#!/usr/bin/env python3
+"""0-1 自建项目的 GitHub 仓库与分支管理。
+
+GitHub 凭据/作者一律读取 pg-code 的 `~/.codex/pg-code/github-context.json`，不读取全局 git
+配置或 shell 环境。安全规则：日志和输出可以出现账号/作者，但禁止输出 token。
+
+分支模型（保留主分支，一个 repo 最多 30 条记录）：
+    main            0-1 干净基线（无 bug）
+    bug-<record>    埋好 bug 的分支      -> 收集表 repo_url（分支地址）
+
+本地 `_gold/` 只用于红绿校准、难度检查和回归验证，不创建远程分支。
+测试模型只在“去掉 .git 的 bug 快照”里跑，永远看不到 main 历史或本地修复态。
+
+用法:
+  github_project.py ensure --root <dir> --repo-name <name> --local-path <clean_project_dir>
+  github_project.py publish --root <dir> --repo-name <name> --project <name>__<record> \
+      [--date YYYY-MM-DD] [--bug-id <id>]
+  github_project.py push-fix --root <dir> --repo-name <name> --project <name>__<record> \
+      [--date YYYY-MM-DD] [--bug-id <id>]
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build_docker import make_dockerfile, detect_go_version, find_go_mod  # noqa: E402
+
+DEFAULT_CONTEXT = Path.home() / ".codex" / "pg-code" / "github-context.json"
+DEFAULT_REMOTE = "origin"
+
+
+def run_git(repo: Path, *args: str, env: dict[str, str] | None = None, check: bool = True):
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
+    return result
+
+
+def load_context(path: Path | None = None) -> dict:
+    p = Path(path or DEFAULT_CONTEXT).expanduser()
+    if not p.exists():
+        raise RuntimeError(f"pg-code GitHub context not found: {p}")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    github = data.get("github") or {}
+    if not github.get("username") or not github.get("token"):
+        raise RuntimeError("pg-code GitHub context is missing username or token")
+    author = data.get("gitAuthor") or {}
+    if not author.get("name") or not author.get("email"):
+        raise RuntimeError("pg-code GitHub context is missing gitAuthor.name or gitAuthor.email")
+    if author.get("name") == "PINRU Local":
+        raise RuntimeError("pg-code GitHub context gitAuthor.name must not be PINRU Local")
+    return data
+
+
+def git_auth_env(remote_url: str, username: str, token: str) -> dict[str, str]:
+    parsed = urlparse(remote_url.strip())
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if parsed.scheme and parsed.netloc:
+        base_url = f"{parsed.scheme}://{parsed.netloc}/"
+        auth = base64.b64encode(f"{username}:{token}".encode("utf-8")).decode("ascii")
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = f"http.{base_url}.extraHeader"
+        env["GIT_CONFIG_VALUE_0"] = f"Authorization: Basic {auth}"
+    return env
+
+
+def git_identity_env(base_env: dict[str, str], author_name: str, author_email: str) -> dict[str, str]:
+    env = base_env.copy()
+    env["GIT_AUTHOR_NAME"] = author_name
+    env["GIT_AUTHOR_EMAIL"] = author_email
+    env["GIT_COMMITTER_NAME"] = author_name
+    env["GIT_COMMITTER_EMAIL"] = author_email
+    return env
+
+
+def api_request(method: str, url: str, token: str, data: dict | None = None) -> dict:
+    body = None
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "go-annotation-pipeline",
+    }
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return {"status": resp.status, "data": json.loads(resp.read().decode("utf-8") or "{}")}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore")
+        try:
+            detail = json.loads(raw)
+        except Exception:
+            detail = {"message": raw}
+        return {"status": exc.code, "data": detail}
+
+
+def slugify(name: str) -> str:
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^a-z0-9_.-]+", "-", s)
+    return s.strip("._-") or "task"
+
+
+def ensure_github_repo(username: str, token: str, repo_name: str) -> str:
+    repo_name = slugify(repo_name)
+    resp = api_request("POST", "https://api.github.com/user/repos", token, {
+        "name": repo_name,
+        "private": False,
+        "auto_init": False,
+        "description": "0-1 Go annotation project",
+    })
+    if resp["status"] not in (200, 201):
+        msg = resp["data"].get("message") or resp["data"]
+        if "name already exists" in str(msg).lower() or resp["status"] == 422:
+            return f"https://github.com/{username}/{repo_name}.git"
+        raise RuntimeError(f"create GitHub repo failed: {resp['status']} {msg}")
+    return f"https://github.com/{username}/{repo_name}.git"
+
+
+def rsync_copy(src: Path, dst: Path) -> None:
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([
+        "rsync", "-a", "--delete",
+        "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=build",
+        "--exclude=*.log", "--exclude=*.jsonl", "--exclude=.env", "--exclude=.env.*",
+        "--exclude=.DS_Store",
+        str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/",
+    ], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rsync failed: {r.stderr[:300]}")
+
+
+def sync_worktree(src: Path, dst: Path) -> None:
+    """把源码目录同步进已有 git repo 的 working tree，保留 dst/.git。"""
+    dst.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([
+        "rsync", "-a", "--delete",
+        "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=build",
+        "--exclude=*.log", "--exclude=*.jsonl", "--exclude=.env", "--exclude=.env.*",
+        "--exclude=.DS_Store", "--exclude=SOURCE.txt", "--exclude=*.source.txt",
+        str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/",
+    ], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rsync failed: {r.stderr[:300]}")
+
+
+DELIVERY_ROOT_FILES = (
+    "benzhi.Dockerfile",
+    "build_benzhi_docker.sh",
+    "BENZHI_README.md",
+    ".dockerignore",
+)
+
+
+def make_build_script() -> str:
+    return """#!/bin/bash
+# 请在仓库根目录运行；第二个参数为目标平台（arm64 / amd64）。
+set -euo pipefail
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+IMAGE_NAME=${1:-my-go-task}
+PLATFORM=${2:-linux/amd64}
+
+docker buildx build --platform "$PLATFORM" -f benzhi.Dockerfile -t "$IMAGE_NAME" .
+
+echo ""
+echo "✅ Docker image '$IMAGE_NAME' built successfully!"
+echo "📋 进入容器: docker run -it $IMAGE_NAME bash"
+"""
+
+
+def make_readme(project: str, go_version: str, module_rel: Path) -> str:
+    module_dir = "." if module_rel == Path(".") else module_rel.as_posix()
+    container_workdir = "/app" if module_dir == "." else f"/app/{module_dir}"
+    return f"""# {project}
+
+## 构建镜像
+
+请从**仓库根目录**执行；`benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 均固定在该目录：
+
+```bash
+./build_benzhi_docker.sh <image-name> [linux/amd64|linux/arm64]
+```
+
+## 标准命令
+
+```bash
+go build ./...     # 编译
+go run ./cmd/app   # 启动（如项目可运行）
+go test ./...      # 测试（如有）
+```
+
+## 环境
+
+- 基础镜像: golang:{go_version}
+- Go 模块目录: `{module_dir}`
+- 依赖已在镜像构建阶段预下载，容器内离线可用。
+- 容器内工作目录: `{container_workdir}`
+"""
+
+
+def _remove_stale_nested_delivery_files(repo: Path) -> None:
+    """删除旧版本写到模块子目录的交付文件，避免发布时出现错误副本。"""
+    for name in DELIVERY_ROOT_FILES:
+        for candidate in repo.rglob(name):
+            if candidate.parent == repo or ".git" in candidate.parts:
+                continue
+            if candidate.is_file() or candidate.is_symlink():
+                candidate.unlink()
+            else:
+                raise RuntimeError(f"交付文件路径不是普通文件，无法安全清理: {candidate}")
+
+
+def _assert_root_delivery_files(repo: Path) -> None:
+    """交付三件套只能位于 GitHub 仓库根目录，防止嵌套模块时漏检。"""
+    missing = [name for name in DELIVERY_ROOT_FILES if not (repo / name).is_file()]
+    nested = [
+        str(candidate.relative_to(repo))
+        for name in DELIVERY_ROOT_FILES
+        for candidate in repo.rglob(name)
+        if candidate.parent != repo and ".git" not in candidate.parts
+    ]
+    if missing or nested:
+        parts = []
+        if missing:
+            parts.append("根目录缺少: " + ", ".join(missing))
+        if nested:
+            parts.append("子目录存在违规副本: " + ", ".join(sorted(nested)))
+        raise RuntimeError("交付文件位置校验失败；benzhi.Dockerfile、build_benzhi_docker.sh、BENZHI_README.md 必须位于仓库根目录（/）: " + "；".join(parts))
+
+
+def ensure_delivery_files(repo: Path, project: str, bug_repro: Path | None = None, module_path: str | None = None) -> None:
+    """生成交付文件并强制其位于 GitHub 仓库根目录。
+
+    即使 go.mod 位于子目录（如 backend/），Docker 构建上下文仍固定为仓库根目录；
+    Dockerfile 会切换到模块目录执行 Go 命令。module_path 缺省时自动探测一层子目录。
+    """
+    mod = find_go_mod(repo, module_path)
+    if not mod:
+        print(f"⚠️  未找到 go.mod（repo 根目录或一层子目录），跳过交付文件生成: {repo}")
+        return
+    module_rel = mod.parent.relative_to(repo)
+    go_version = detect_go_version(mod)
+    _remove_stale_nested_delivery_files(repo)
+    (repo / "benzhi.Dockerfile").write_text(
+        make_dockerfile(go_version, (mod.parent / "go.sum").exists(), module_rel.as_posix()),
+        encoding="utf-8",
+    )
+    build_sh = repo / "build_benzhi_docker.sh"
+    build_sh.write_text(make_build_script(), encoding="utf-8")
+    os.chmod(build_sh, 0o755)
+    (repo / "BENZHI_README.md").write_text(make_readme(project, go_version, module_rel), encoding="utf-8")
+    (repo / ".dockerignore").write_text(".git\n*.log\n*.jsonl\nnode_modules\ndist\nbuild\n.env\n.env.*\n", encoding="utf-8")
+    if bug_repro and bug_repro.exists():
+        target_repro = repo / "BUG_REPRO.md"
+        if bug_repro.resolve() != target_repro.resolve():
+            shutil.copy2(bug_repro, target_repro)
+    elif bug_repro:
+        print(f"⚠️  未找到 BUG_REPRO.md: {bug_repro}（每条记录都应提供，见 SKILL.md 第 6.2 步）")
+    _assert_root_delivery_files(repo)
+
+
+def central_repo_dir(root: Path, repo_name: str) -> Path:
+    return root / "_repos" / slugify(repo_name)
+
+
+_NAME_MAP = "_name_map.json"
+
+
+def _name_map_path(root: Path) -> Path:
+    return root / "_repos" / _NAME_MAP
+
+
+def _load_name_map(root: Path) -> dict:
+    p = _name_map_path(root)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_name_map(root: Path, m: dict) -> None:
+    p = _name_map_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def resolve_repo_name(root: Path, base: str) -> str | None:
+    """把用户传入的 base 名解析为实际 GitHub repo 名（带随机码）。"""
+    m = _load_name_map(root)
+    if base in m:
+        return m[base]
+    # 兼容旧仓库：没有映射但本地已有同名 central repo
+    if (root / "_repos" / base / ".git").exists():
+        return base
+    return None
+
+
+def assign_repo_name(root: Path, base: str) -> str:
+    """返回实际 GitHub repo 名：默认直接用 base（真实项目名，无 go- 前缀、无随机码）；已有映射时复用旧名。"""
+    return resolve_repo_name(root, base) or base
+
+
+def cmd_ensure(args):
+    root = Path(args.root)
+    if not Path(args.local_path).is_dir():
+        raise RuntimeError(f"local path not found: {args.local_path}")
+    base = slugify(args.repo_name)
+    repo_name = assign_repo_name(root, base)
+    repo = central_repo_dir(root, repo_name)
+    repo.parent.mkdir(parents=True, exist_ok=True)
+
+    ctx = load_context()
+    github = ctx["github"]
+    author = ctx["gitAuthor"]
+    username = github["username"]
+    token = github["token"]
+    author_name = author["name"]
+    author_email = author["email"]
+
+    if not (repo / ".git").exists():
+        rsync_copy(Path(args.local_path), repo)
+        ensure_delivery_files(repo, repo_name, None, getattr(args, "module_path", None))
+        run_git(repo, "init", "-b", "main")
+        run_git(repo, "config", "user.name", author_name)
+        run_git(repo, "config", "user.email", author_email)
+        env = git_identity_env(os.environ.copy(), author_name, author_email)
+        run_git(repo, "add", "-A", "--", ".")
+        if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
+            raise RuntimeError("clean baseline has no files to commit")
+        run_git(repo, "commit", "-m", f"feat: {repo_name} 0-1 baseline", env=env)
+    else:
+        # 已有 central repo 时也确保 eval Dockerfile 在 main 工作区里。
+        run_git(repo, "checkout", "main", check=False)
+
+    remote_url = ensure_github_repo(username, token, repo_name)
+    existing = run_git(repo, "remote", "get-url", DEFAULT_REMOTE, check=False)
+    if existing.returncode != 0:
+        run_git(repo, "remote", "add", DEFAULT_REMOTE, remote_url)
+    else:
+        run_git(repo, "remote", "set-url", DEFAULT_REMOTE, remote_url)
+
+    auth_env = git_auth_env(remote_url, username, token)
+    identity_env = git_identity_env(auth_env, author_name, author_email)
+    run_git(repo, "checkout", "main")
+    run_git(repo, "push", "-u", DEFAULT_REMOTE, "main", env=identity_env)
+    html = remote_url[:-4] if remote_url.endswith(".git") else remote_url
+    print(json.dumps({"ok": True, "repoName": repo_name, "repoUrl": html, "localRepo": str(repo)}, ensure_ascii=False))
+
+
+def cmd_publish(args):
+    root = Path(args.root)
+    base = slugify(args.repo_name)
+    repo_name = resolve_repo_name(root, base) or base
+    proj_name = args.project.replace("/", "__").lower()
+    proj = root / (args.date or __import__("datetime").date.today().isoformat()) / proj_name
+
+    if not (proj / "env").exists():
+        raise RuntimeError(f"bug env not found: {proj / 'env'}")
+
+    bug_id = args.bug_id
+    if not bug_id:
+        coll = proj / "collection.json"
+        if coll.exists():
+            data = json.loads(coll.read_text(encoding="utf-8"))
+            bug_id = data.get("bug_id") or ""
+    if not bug_id:
+        raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
+
+    repo = central_repo_dir(root, repo_name)
+    if not (repo / ".git").exists():
+        raise RuntimeError(f"central repo not found: {repo}（请先运行 github_project.py ensure）")
+
+    ctx = load_context()
+    github = ctx["github"]
+    author = ctx["gitAuthor"]
+    username = github["username"]
+    token = github["token"]
+    author_name = author["name"]
+    author_email = author["email"]
+
+    remote_url = run_git(repo, "remote", "get-url", DEFAULT_REMOTE).stdout.strip()
+    html = remote_url[:-4] if remote_url.endswith(".git") else remote_url
+    auth_env = git_auth_env(remote_url, username, token)
+    identity_env = git_identity_env(auth_env, author_name, author_email)
+
+    record = proj_name.rsplit("__", 1)[-1] if "__" in proj_name else "001"
+    bug_branch = f"bug-{record}"
+
+    run_git(repo, "checkout", "main")
+    run_git(repo, "checkout", "-B", bug_branch, "main")
+    sync_worktree(proj / "env", repo)
+    ensure_delivery_files(repo, proj_name, proj / "BUG_REPRO.md", getattr(args, "module_path", None))
+    _assert_root_delivery_files(repo)
+    run_git(repo, "add", "-A", "--", ".")
+    run_git(repo, "commit", "-m", f"bug: {bug_id}", env=identity_env)
+    run_git(repo, "push", "-u", DEFAULT_REMOTE, bug_branch, env=identity_env)
+    repo_url = f"{html}/tree/{bug_branch}"
+
+    run_git(repo, "checkout", "main")
+    print(json.dumps({
+        "ok": True,
+        "repoUrl": repo_url,
+        "bugBranch": bug_branch,
+    }, ensure_ascii=False))
+
+
+def cmd_push_fix(args):
+    """bugfix 题轨迹质检通过后，把测试模型修复后的 env/ 作为新 commit 推到 bug-<record>。
+
+    复用 sync_worktree（防泄漏排除）+ ensure_delivery_files（重建交付三件套），
+    替代原来手动 rsync --delete 的做法——手动命令会把根目录交付文件一并删掉。
+    """
+    root = Path(args.root)
+    base = slugify(args.repo_name)
+    repo_name = resolve_repo_name(root, base) or base
+    proj_name = args.project.replace("/", "__").lower()
+    proj = root / (args.date or __import__("datetime").date.today().isoformat()) / proj_name
+
+    env_dir = proj / "env"
+    if not env_dir.exists():
+        raise RuntimeError(f"bug env not found: {env_dir}")
+
+    coll = proj / "collection.json"
+    bug_id = args.bug_id
+    task_type = ""
+    if coll.exists():
+        data = json.loads(coll.read_text(encoding="utf-8"))
+        bug_id = bug_id or data.get("bug_id") or ""
+        task_type = (data.get("task_type") or "").strip().lower()
+    if not bug_id:
+        raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
+    if task_type == "diagnosis":
+        raise RuntimeError("diagnosis 题不推测试模型 fix：bug 分支必须保持埋好 bug 的代码")
+
+    # 绿灯门禁：只有绿灯确认过的修复才推上 GitHub，避免无效修复 commit 进交付分支。
+    if not getattr(args, "force", False):
+        ev = proj / "_evidence"
+        missing = [p.name for p in (ev / "verify_green.jsonl", ev / "verify_result.json") if not p.exists()]
+        if missing:
+            raise RuntimeError(
+                "绿灯验收未完成（缺少 _evidence/" + "、_evidence/".join(missing) + "）。"
+                "请先运行 run_evidence_trajectories.py generate --phase green 通过绿灯再推送；确需强推用 --force（不推荐）。"
+            )
+
+    repo = central_repo_dir(root, repo_name)
+    if not (repo / ".git").exists():
+        raise RuntimeError(f"central repo not found: {repo}（请先运行 github_project.py ensure/publish）")
+
+    ctx = load_context()
+    github = ctx["github"]
+    author = ctx["gitAuthor"]
+    remote_url = run_git(repo, "remote", "get-url", DEFAULT_REMOTE).stdout.strip()
+    html = remote_url[:-4] if remote_url.endswith(".git") else remote_url
+    auth_env = git_auth_env(remote_url, github["username"], github["token"])
+    identity_env = git_identity_env(auth_env, author["name"], author["email"])
+
+    record = proj_name.rsplit("__", 1)[-1] if "__" in proj_name else "001"
+    bug_branch = f"bug-{record}"
+    if run_git(repo, "rev-parse", "--verify", bug_branch, check=False).returncode != 0:
+        raise RuntimeError(f"分支 {bug_branch} 不存在（请先运行 github_project.py publish）")
+
+    run_git(repo, "checkout", bug_branch)
+    sync_worktree(env_dir, repo)
+    ensure_delivery_files(repo, proj_name, proj / "BUG_REPRO.md", getattr(args, "module_path", None))
+    _assert_root_delivery_files(repo)
+    run_git(repo, "add", "-A", "--", ".")
+    if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
+        raise RuntimeError(f"env 与 {bug_branch} 无差异：bugfix 题测试模型应有修复改动，请确认轨迹质检结论")
+    run_git(repo, "commit", "-m", f"fix: {bug_id}", env=identity_env)
+    run_git(repo, "push", DEFAULT_REMOTE, bug_branch, env=identity_env)
+    fix_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    run_git(repo, "checkout", "main")
+    print(json.dumps({
+        "ok": True,
+        "repoUrl": f"{html}/tree/{bug_branch}",
+        "fixCommit": f"{html}/commit/{fix_sha}",
+        "bugBranch": bug_branch,
+    }, ensure_ascii=False))
+
+
+def main():
+    p = argparse.ArgumentParser(description="0-1 自建项目 GitHub 仓库与分支管理")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("ensure")
+    c.add_argument("--root", default=".")
+    c.add_argument("--repo-name", required=True)
+    c.add_argument("--local-path", required=True)
+    c.add_argument("--module-path", help="Go module 相对仓库根目录的子目录（如 backend），缺省自动探测")
+    c.set_defaults(func=cmd_ensure)
+
+    c = sub.add_parser("publish")
+    c.add_argument("--root", default=".")
+    c.add_argument("--repo-name", required=True)
+    c.add_argument("--project", required=True)
+    c.add_argument("--date")
+    c.add_argument("--bug-id")
+    c.add_argument("--module-path", help="Go module 相对仓库根目录的子目录（如 backend），缺省自动探测")
+    c.set_defaults(func=cmd_publish)
+
+    c = sub.add_parser("push-fix")
+    c.add_argument("--root", default=".")
+    c.add_argument("--repo-name", required=True)
+    c.add_argument("--project", required=True)
+    c.add_argument("--date")
+    c.add_argument("--bug-id")
+    c.add_argument("--module-path", help="Go module 相对仓库根目录的子目录（如 backend），缺省自动探测")
+    c.add_argument("--force", action="store_true", help="跳过绿灯门禁强制推送（不推荐）")
+    c.set_defaults(func=cmd_push_fix)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
