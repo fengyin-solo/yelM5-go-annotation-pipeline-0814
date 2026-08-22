@@ -49,3 +49,5 @@
 2026-08-20 skill 名称与目录增加 yelM5- 前缀，并初始化独立 Git 仓库用于后续持续推送
 2026-08-20 success_criteria 业务场景硬门禁：按 bugfix/diagnosis 分开生成，必须复用 user_query 中至少一个 4 字以上业务短语并写清具体异常与后续影响；collection_table.py 与 post_qc.py 拦截空泛流程描述
 2026-08-20 交付字段真实故障叙事：bug_id/user_query/gold_root_cause/success_criteria/prompt 禁止出现埋错、人工注入、出题环境、_gold 等内部构造痕迹；success_criteria 统一改写为问题存在时/修复后
+2026-08-20 禁止领域前置门禁：新增完整 forbidden-domains 清单与 domain_guard.py；项目、功能点、题面三层语义审查前移到编码/建仓/埋错前，ensure/填表/题面自检/post_qc 自动复查，命中后必须换题不得只改文案
+2026-08-22 修复轨迹目标测试彻底隔离：新增私有 evaluator/、无 *_test.go 系统临时工作区、越界/测试工具调用守卫；正式轨迹不执行 verify_cmds 且不注入额外提示词；红绿证据与 post_qc 仅在临时副本注入 evaluator；GitHub 严格分为 fix commit 后 test commit

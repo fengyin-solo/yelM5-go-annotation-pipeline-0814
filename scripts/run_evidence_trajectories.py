@@ -56,6 +56,7 @@ from workspace import find_project          # noqa: E402
 from upload_trajectory import upload_file, get_cookie  # noqa: E402
 from serial_lock import test_model_lock     # noqa: E402
 from run_trajectory import find_native_transcript, archive_files  # noqa: E402
+from trajectory_guard import inject_evaluator, private_test_issues  # noqa: E402
 
 RED_RESULT = "red"
 GREEN_RESULT = "green"
@@ -252,6 +253,16 @@ def _prepare_env(src: Path, dst: Path) -> None:
         raise RuntimeError(f"rsync 失败: {r.stderr[:300]}")
 
 
+def _run_full_regression(env_dir: Path, go_env: dict) -> tuple[int, str]:
+    module_dir = env_dir
+    if not (module_dir / "go.mod").exists():
+        candidates = sorted(env_dir.glob("*/go.mod"))
+        if len(candidates) == 1:
+            module_dir = candidates[0].parent
+    result = _run(["go", "test", "./..."], cwd=str(module_dir), env=go_env)
+    return result.returncode, (result.stdout + result.stderr)
+
+
 def _pass_red(text: str, changed: list[str]) -> bool:
     return ("BUG 存在" in text) and ("BUG 不存在" not in text) and (not changed)
 
@@ -343,16 +354,20 @@ def _snapshot_baseline(env: Path, snap: Path) -> None:
 
 
 def _run_verify_mode(mode: str, src: Path, env_dir: Path, out: Path, verify_cmds: str,
-                     claude_bin: str, go_env: dict, timeout: int, proj_name: str) -> str:
+                     claude_bin: str, go_env: dict, timeout: int, proj_name: str,
+                     evaluator: Path) -> str:
     """跑一种颜色的证据轨迹（最多重试 3 次）。通过返回 session_id，不通过返回空串。"""
     prompt = _make_verify_prompt(verify_cmds, mode)
     for attempt in range(1, 4):
         _prepare_env(src, env_dir)
+        inject_evaluator(evaluator, env_dir)
+        expected = env_dir.parent / f".{mode}_expected"
+        _prepare_env(env_dir, expected)
         print(f"--- {mode}/验证 第 {attempt}/3 次（目标模型）: {proj_name} ---")
         rc = _run_claude_verify(env_dir, prompt, out, claude_bin, go_env, timeout)
         sid = _extract_session_from_file(out)
         text = _final_text(out)
-        changed = _diff_clean(env_dir, src)
+        changed = _diff_clean(env_dir, expected)
         command_issue = _exact_command_issue(out, verify_cmds)
         reported_issue = _reported_command_issue(text, verify_cmds)
         ok = (not command_issue and not reported_issue and
@@ -377,6 +392,7 @@ def _run_verify_mode(mode: str, src: Path, env_dir: Path, out: Path, verify_cmds
                 print(f"    ❌ {mode} 验收失败：原始 session {native_issue}")
                 continue
             print(f"    ✅ {mode} 验收通过（结论正确、环境零改动）；已保存原始轨迹: {out.name}")
+            shutil.rmtree(expected, ignore_errors=True)
             return sid
         if command_issue:
             print(f"    ❌ {mode} 验收失败：{command_issue}")
@@ -388,6 +404,7 @@ def _run_verify_mode(mode: str, src: Path, env_dir: Path, out: Path, verify_cmds
             print(f"    ❌ 绿灯验收失败：结论={'未识别' if ('已修复' not in text and '未修复' not in text) else ('未修复' if '未修复' in text else '已修复')}，环境改动={len(changed)} 文件")
         if changed:
             print("       环境改动示例: " + "; ".join(changed[:5]))
+        shutil.rmtree(expected, ignore_errors=True)
     return ""
 
 
@@ -451,6 +468,14 @@ def cmd_generate(args):
         print("❌ verify_cmds 硬门禁：" + "；".join(verify_issues))
         sys.exit(1)
 
+    evaluator = proj / "evaluator"
+    private_issues = private_test_issues(proj / "env", evaluator, verify_cmds)
+    if private_issues:
+        print("❌ 私有测试门禁：")
+        for issue in private_issues:
+            print("   -", issue)
+        sys.exit(1)
+
     ev = proj / "_evidence"
     ev.mkdir(parents=True, exist_ok=True)
     base_snap = proj / ".base_snapshot"
@@ -495,7 +520,8 @@ def cmd_generate(args):
         _snapshot_baseline(env_dir, base_snap)
         with test_model_lock(timeout=lock_timeout):
             red_sid = _run_verify_mode("red", base_snap, ev / "red_env", red_out,
-                                       verify_cmds, claude_bin, go_env, timeout, proj.name)
+                                       verify_cmds, claude_bin, go_env, timeout, proj.name,
+                                       evaluator)
         if not red_sid:
             print("❌ 红灯不达标：bug 在基线上未按预期复现，或测试模型动了代码。")
             print("   请回滚 env 重新埋错（红）后重跑本命令；红灯通过之前不要进入第 7 步跑修复轨迹。")
@@ -544,18 +570,32 @@ def cmd_generate(args):
 
     # 重跑绿灯：把上一轮绿灯产物归档到 _failed_rounds/，不污染本轮。
     prev_green = [p for p in (green_out, green_out.with_name("verify_green.stream.jsonl"),
-                              Path(str(green_out) + ".log")) if p.exists()]
+                              Path(str(green_out) + ".log"), ev / "green_regression.json") if p.exists()]
     if prev_green:
         dest = archive_files(proj, prev_green, "green-retry")
         print(f"🗂  已把上一轮绿灯产物归档到: {dest}")
 
     with test_model_lock(timeout=lock_timeout):
         green_sid = _run_verify_mode("green", fixed_env, ev / "green_env", green_out,
-                                     verify_cmds, claude_bin, go_env, timeout, proj.name)
+                                     verify_cmds, claude_bin, go_env, timeout, proj.name,
+                                     evaluator)
     if not green_sid:
         print("❌ 绿灯不达标：测试模型修复后的 env 未让验收命令全绿，或验证时动了代码。")
         print("   这说明该修复轨迹实际无效（质检结论可能有误或测试 flaky），请回滚重跑第 7 步修复轨迹并重新质检，再重跑本命令。")
         sys.exit(1)
+
+    regression_rc, regression_output = _run_full_regression(ev / "green_env", go_env)
+    regression_state = ev / "green_regression.json"
+    regression_state.write_text(json.dumps({
+        "result": "passed" if regression_rc == 0 else "failed",
+        "command": "go test ./...",
+        "exit_code": regression_rc,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if regression_rc != 0:
+        print("❌ 私有绿灯通过，但全量回归 go test ./... 失败：")
+        print(regression_output[-1000:])
+        sys.exit(1)
+    print("✅ 私有绿灯后全量回归通过: go test ./...")
 
     if args.skip_upload:
         obj = _build_verify_result(red_sid, green_sid, red_url, "", task_type)

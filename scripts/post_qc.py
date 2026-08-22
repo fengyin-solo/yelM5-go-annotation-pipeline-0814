@@ -5,17 +5,20 @@
 只读，不改任何产物；逐条输出 ✅/❌，最后给出汇总，不合格时退出码非 0。
 
 校验项（对应甲方抽检红线）：
-  1. build       env 与 _gold 都能 `go build ./...`（项目能编译）
-  2. scope       bugfix 的 gold 修复至少改 4 个功能文件且增删总行数至少 20 行
-  3. red         埋错基线（.base_snapshot）跑验收/复现命令必须红（bug 真实可复现）
-  4. green       _gold 跑同样命令必须绿（修复后通过）
-  5. files       交付文件齐全（轨迹 jsonl、BUG_REPRO、collection.json）
-  6. fields      collection.json 必填字段齐全（bugfix: verify_cmds/verify_result；
+  1. privacy     目标测试只存在私有 evaluator，env 和初始 Bug 基线不得包含
+  2. build       env 与 _gold 都能 `go build ./...`（项目能编译）
+  3. scope       bugfix 的 gold 修复至少改 4 个功能文件且增删总行数至少 20 行
+  4. red         埋错基线（.base_snapshot）跑验收/复现命令必须红（bug 真实可复现）
+  5. green       _gold 跑同样命令必须绿（修复后通过）
+  6. files       交付文件齐全（轨迹 jsonl、BUG_REPRO、collection.json）
+  7. fields      collection.json 必填字段齐全（bugfix: verify_cmds/verify_result；
                  diagnosis: verify_cmds/gold_root_cause/verify_result）
-  7. evidence    verify_result 结构正确、URL 可访问、session_id 匹配
-  8. diagnosis   diagnosis 题 env 与埋错基线零差异（全程零代码改动）
-  9. coverage    verify_cmds 为单包、单测试、-count=1，且红灯失败测试真实存在
- 10. difficulty  运行时机制、跨层触发、题面症状覆盖和逐文件回退证据齐全
+  8. evidence    verify_result 结构正确、URL 可访问、session_id 匹配
+  9. trajectory_guard  正式轨迹未接触测试/外部路径；bugfix 绿灯后全量回归通过
+ 10. diagnosis   diagnosis 题 env 与埋错基线零差异（全程零代码改动）
+ 11. coverage    verify_cmds 为单包、单测试、-count=1，且红灯失败测试真实存在
+ 12. difficulty  运行时机制、跨层触发、题面症状覆盖和逐文件回退证据齐全
+ 13. domain      项目名称与交付字段未命中禁止项目/功能点；仍须人工语义审查
 
 用法:
   post_qc.py --root <root> [--date YYYY-MM-DD] [--project <name>__<record>] [--go-version 1.22]
@@ -29,10 +32,15 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trajectory_guard import inject_evaluator, private_test_issues  # noqa: E402
 
 
 def norm(s: str) -> str:
@@ -237,6 +245,11 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         return results
 
     base = proj / ".base_snapshot"
+    evaluator = proj / "evaluator"
+    privacy_issues = private_test_issues(env_dir, evaluator, verify_cmds)
+    if base.exists():
+        privacy_issues.extend(private_test_issues(base, evaluator, verify_cmds))
+    results.append(("privacy", not privacy_issues, "；".join(privacy_issues) or "目标测试只存在私有 evaluator"))
 
     # 1. build
     build_fail = []
@@ -265,24 +278,33 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     red_executed_cmds = evidence_executed_commands_for(proj, "red")
     green_executed_cmds = evidence_executed_commands_for(proj, "green") if task_type == "bugfix" else []
     red_cmd = verify_cmds
-    if red_cmd:
-        red_rc, red_out = run(red_cmd, buggy, env)
-        red_ok = red_rc != 0
-        results.append(("red", red_ok, f"exit={red_rc}" + ("" if red_ok else "（基线竟然绿了）")))
-    else:
-        red_rc, red_out = 0, ""
-        results.append(("red", False, "缺少定向复现命令"))
-
-    if task_type == "bugfix":
-        if verify_cmds:
-            green_rc, _ = run(verify_cmds, gold_dir, env)
-            green_ok = green_rc == 0
-            results.append(("green", green_ok, f"exit={green_rc}"))
+    with tempfile.TemporaryDirectory(prefix="go-annotation-post-qc-") as tmp:
+        tmp_root = Path(tmp)
+        red_dir = tmp_root / "red"
+        green_dir = tmp_root / "green"
+        shutil.copytree(buggy, red_dir)
+        if evaluator.is_dir():
+            inject_evaluator(evaluator, red_dir)
+        if red_cmd:
+            red_rc, red_out = run(red_cmd, red_dir, env)
+            red_ok = red_rc != 0
+            results.append(("red", red_ok, f"exit={red_rc}" + ("" if red_ok else "（基线竟然绿了）")))
         else:
-            results.append(("green", False, "缺 verify_cmds"))
-    else:
-        rc, _ = run("go test ./...", gold_dir, env)
-        results.append(("green", rc == 0, f"go test exit={rc}"))
+            red_rc, red_out = 0, ""
+            results.append(("red", False, "缺少定向复现命令"))
+
+        if task_type == "bugfix":
+            if verify_cmds:
+                shutil.copytree(gold_dir, green_dir)
+                if evaluator.is_dir():
+                    inject_evaluator(evaluator, green_dir)
+                green_rc, _ = run(verify_cmds, green_dir, env)
+                green_ok = green_rc == 0
+                results.append(("green", green_ok, f"exit={green_rc}"))
+            else:
+                results.append(("green", False, "缺 verify_cmds"))
+        else:
+            results.append(("green", True, "n/a（diagnosis 仅要求红灯证据）"))
 
     # 5. files
     sid = (coll.get("session_id") or "").strip()
@@ -317,6 +339,29 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     # 7. evidence
     ok, msg = verify_result_ok(proj, coll, task_type)
     results.append(("evidence", ok, msg))
+    guard_path = proj / "_evidence" / "trajectory_guard.json"
+    regression_path = proj / "_evidence" / "green_regression.json"
+    guard_ok = False
+    guard_msg = "缺 trajectory_guard.json"
+    if guard_path.exists():
+        try:
+            guard = json.loads(guard_path.read_text(encoding="utf-8"))
+            guard_ok = (guard.get("result") == "passed" and guard.get("tests_visible") is False and
+                        (not sid or guard.get("session_id") == sid))
+            guard_msg = "ok" if guard_ok else "轨迹守卫状态或 session_id 无效"
+        except Exception as exc:
+            guard_msg = f"轨迹守卫 JSON 无效: {exc}"
+    if task_type == "bugfix":
+        regression_ok = False
+        if regression_path.exists():
+            try:
+                regression_ok = json.loads(regression_path.read_text(encoding="utf-8")).get("result") == "passed"
+            except Exception:
+                regression_ok = False
+        guard_ok = guard_ok and regression_ok
+        if not regression_ok:
+            guard_msg += "；缺少或未通过绿灯后全量回归"
+    results.append(("trajectory_guard", guard_ok, guard_msg))
 
     # 8. diagnosis 零改动
     if task_type == "diagnosis":
@@ -346,7 +391,7 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
             "user_query": prompt_file.read_text(encoding="utf-8").strip(),
         }))
     ft = fail_tests(red_out)
-    known = project_tests(env_dir) | project_tests(gold_dir)
+    known = project_tests(env_dir) | project_tests(gold_dir) | project_tests(evaluator)
     unknown = sorted(t for t in ft if t not in known)
     if not ft:
         relation_error = "红灯无 FAIL 测试（可能 build 失败或命令跑空）"
@@ -376,6 +421,20 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         "difficulty",
         difficulty_ok,
         "；".join(difficulty_issues) if difficulty_issues else "难度审查证据齐全",
+    ))
+
+    # 11. 禁止项目/功能点：机器拦截明确关键词，语义等价项仍须人工审查。
+    from domain_guard import validate_collection_domains, validate_project_domain
+    domain_issues = validate_collection_domains(coll)
+    if prompt_file.exists():
+        domain_issues.extend(validate_collection_domains({
+            "user_query": prompt_file.read_text(encoding="utf-8").strip(),
+        }))
+    domain_issues.extend(validate_project_domain(env_dir, proj.name.rsplit("__", 1)[0]))
+    results.append((
+        "domain",
+        not domain_issues,
+        "；".join(domain_issues) if domain_issues else "关键词门禁通过；仍须人工确认项目与功能点语义不在禁区",
     ))
 
     return results

@@ -12,7 +12,8 @@
       <name>__<record>/       # local：本地项目第 N 条（record=001…030）
         status.json           # 项目状态卡（唯一状态事实源，不含答案线索）
         repo/                 # github: 下载源码(含 .git 供分析)
-        env/                  # 埋好 bug 的 workspace（测试模型在这里跑轨迹）
+        env/                  # 埋好 bug 的业务代码（脚本由此生成无测试隔离副本）
+        evaluator/            # 私有目标测试（修复轨迹不可见）
         prompt.txt            # 题面
         <session_id>.jsonl    # 轨迹
         collection.json       # 本项目 21 字段填表数据
@@ -207,6 +208,7 @@ def cmd_new_project(args):
                 continue
             proj.mkdir(parents=True, exist_ok=True)
             (proj / "env").mkdir(exist_ok=True)
+            (proj / "evaluator").mkdir(exist_ok=True)
             # env = 待埋错 workspace（模型工作目录）
             rsync_copy(src, proj / "env")
             # gold = 出题人私有答案区（干净基线 + 正确代码），项目目录外，不进交付
@@ -229,7 +231,7 @@ def cmd_new_project(args):
             save_status(proj, data)
             print(f"✅ 已创建本地项目 {proj}")
             print(f"   source=local  repo={name}  record={rec}  state=candidate")
-            print(f"   env/ = 待埋错 workspace；gold 基线在 {gold}")
+            print(f"   env/ = 待埋错 workspace；evaluator/ = 私有目标测试；gold 基线在 {gold}")
 
     else:
         print(f"❌ 未知 source: {source}")

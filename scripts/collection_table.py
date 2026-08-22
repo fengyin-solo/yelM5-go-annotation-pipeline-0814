@@ -226,6 +226,7 @@ def cmd_write(args):
         print("❌ harness 必须写明生成轨迹的工具名 + 版本号，例如 Claude Code CLI v2.1.233")
         sys.exit(1)
     if task_type in ("bugfix", "diagnosis"):
+        from domain_guard import validate_collection_domains
         from verify_cmds import (
             CONCURRENCY_CATEGORY,
             validate_concurrency_metadata,
@@ -238,8 +239,10 @@ def cmd_write(args):
         verify_issues.extend(validate_concurrency_metadata(clean))
         verify_issues.extend(validate_success_criteria(clean))
         verify_issues.extend(validate_delivery_field_wording(clean))
+        verify_issues.extend(validate_collection_domains(clean))
         if prompt_text and prompt_text != user_query:
             verify_issues.extend(validate_delivery_field_wording({"user_query": prompt_text}))
+            verify_issues.extend(validate_collection_domains({"user_query": prompt_text}))
         if verify_issues:
             print("❌ 收集表硬门禁：" + "；".join(verify_issues))
             sys.exit(1)

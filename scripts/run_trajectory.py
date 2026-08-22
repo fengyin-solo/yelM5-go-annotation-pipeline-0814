@@ -22,10 +22,18 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from serial_lock import test_model_lock  # noqa: E402
+from trajectory_guard import (  # noqa: E402
+    copy_without_tests,
+    private_test_issues,
+    sync_business_back,
+    test_manifest,
+    trajectory_policy_issues,
+)
 
 
 def _default_claude() -> str:
@@ -134,16 +142,13 @@ def env_changed(env: Path, snapshot: Path | None) -> list[str] | None:
     return None
 
 
-def validate_task(env: Path, snapshot: Path | None, task_type: str, verify_cmds: str, go_env: dict) -> list[str]:
-    """跑完一条轨迹后做任务结果校验；返回问题列表（非空则视为失败，触发重试）。"""
+def validate_task(env: Path, snapshot: Path | None, task_type: str) -> list[str]:
+    """正式修复轨迹只校验改动语义，绝不在此阶段执行 verify_cmds。"""
     issues = []
     if task_type == "bugfix":
-        if not verify_cmds:
-            return issues
-        r = run(["bash", "-c", verify_cmds], cwd=str(env), env=go_env)
-        if r.returncode != 0:
-            tail = (r.stdout + r.stderr)[-600:]
-            issues.append(f"bugfix 验收命令仍失败（exit={r.returncode}）: {tail}")
+        changed = env_changed(env, snapshot)
+        if not changed:
+            issues.append("bugfix 没有业务文件改动")
     elif task_type == "diagnosis":
         changed = env_changed(env, snapshot)
         if changed:
@@ -318,7 +323,7 @@ def archive_previous_round(project_dir: Path, reason: str = "rerun") -> Path | N
     ev = project_dir / "_evidence"
     if ev.exists():
         for p in ev.iterdir():
-            if p.is_file() and p.name.startswith("verify_green"):
+            if p.is_file() and (p.name.startswith("verify_green") or p.name in {"trajectory_guard.json", "green_regression.json"}):
                 candidates.append(p)
         green_env = ev / "green_env"
         if green_env.exists():
@@ -370,9 +375,9 @@ def skill_leak_issues(env: Path, prompt_text: str) -> list[str]:
 
 
 def cmd_run(args):
-    env = Path(args.env)
-    prompt = Path(args.prompt)
-    out = Path(args.output)
+    env = Path(args.env).resolve()
+    prompt = Path(args.prompt).resolve()
+    out = Path(args.output).resolve()
     if not prompt.exists():
         print(f"❌ 题面不存在: {prompt}")
         sys.exit(1)
@@ -381,6 +386,16 @@ def cmd_run(args):
         print(f"❌ 题面为空: {prompt}")
         sys.exit(1)
     issues = skill_leak_issues(env, prompt_text)
+    collection_path = out.parent / "collection.json"
+    collection = {}
+    if collection_path.exists():
+        try:
+            collection = json.loads(collection_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"collection.json 无法解析: {exc}")
+    verify_cmds = (getattr(args, "verify_cmds", "") or collection.get("verify_cmds") or "").strip()
+    evaluator = Path(getattr(args, "evaluator", "") or out.parent / "evaluator").resolve()
+    issues.extend(private_test_issues(env, evaluator, verify_cmds))
     if issues:
         print("❌ 检测到技能/答案泄露风险，拒绝跑轨迹：")
         for i in issues:
@@ -395,10 +410,9 @@ def cmd_run(args):
 
     # 红灯门禁：正式跑轨迹前必须有已通过的红灯证据（run_evidence_trajectories.py generate --phase red）。
     red_state = out.parent / "_evidence" / "red_result.json"
-    if not red_state.exists() and not getattr(args, "skip_red_gate", False):
+    if not red_state.exists():
         print("❌ 红灯门禁未通过：缺少 _evidence/red_result.json。")
         print("   请先运行 run_evidence_trajectories.py generate --phase red，让测试模型实测确认 bug 可复现，再跑修复轨迹。")
-        print("   （确需跳过门禁用 --skip-red-gate，不推荐。）")
         sys.exit(1)
 
     # Go 版本钉死：轨迹必须跑在 go.mod 声明的版本上，避免「声明 1.22 实际 1.25」。
@@ -434,14 +448,39 @@ def cmd_run(args):
                 print(f"❌ 自动创建 base 快照失败: {r.stderr[:300]}")
                 sys.exit(2)
             print(f"📸 已自动创建 base 快照: {snapshot}")
+    if snapshot is None:
+        print("❌ 正式轨迹必须使用无 .git 的 env 和独立快照，不允许直接在 Git 工作树中运行")
+        sys.exit(2)
+    snapshot = snapshot.resolve()
+    snapshot_issues = private_test_issues(snapshot, evaluator, verify_cmds)
+    if snapshot_issues:
+        print("❌ 基线快照仍含私有目标测试，拒绝跑轨迹：")
+        for issue in snapshot_issues:
+            print("   -", issue)
+        sys.exit(1)
 
+    # 原始 env 先回到基线；正式轨迹在系统临时目录的无测试副本中运行。
+    try:
+        rollback(env, snapshot)
+    except RuntimeError as exc:
+        print(f"❌ env 回滚失败: {exc}")
+        sys.exit(2)
+    baseline_tests = test_manifest(env)
+    task_type = (getattr(args, "task_type", None) or collection.get("task_type") or "").strip()
     lock_timeout = getattr(args, "lock_timeout", 0)
-    # 测试模型限流：red / green / 修复轨迹必须全局串行；整个重试循环持锁。
-    with test_model_lock(timeout=lock_timeout):
-      for attempt in range(1, args.max_attempts + 1):
-        # 每次跑之前先把环境回滚干净
+    with tempfile.TemporaryDirectory(prefix="go-annotation-trajectory-") as temp_dir:
+      temp_root = Path(temp_dir)
+      work_env = temp_root / "workspace"
+      work_snapshot = temp_root / "base"
+      copy_without_tests(snapshot, work_snapshot)
+      copy_without_tests(snapshot, work_env)
+      print(f"🔒 修复轨迹将在无任何 *_test.go 的隔离副本中运行: {work_env}")
+
+      # 测试模型限流：red / green / 修复轨迹必须全局串行；整个重试循环持锁。
+      with test_model_lock(timeout=lock_timeout):
+       for attempt in range(1, args.max_attempts + 1):
         try:
-            method = rollback(env, snapshot)
+            method = rollback(work_env, work_snapshot)
         except RuntimeError as e:
             print(f"❌ 第 {attempt} 次回滚失败: {e}")
             sys.exit(2)
@@ -469,7 +508,7 @@ def cmd_run(args):
 
         with open(attempt_out, "w", encoding="utf-8") as fo, open(log, "w", encoding="utf-8") as fe:
             try:
-                proc = subprocess.run(cmd, cwd=str(env), stdout=fo, stderr=fe,
+                proc = subprocess.run(cmd, cwd=str(work_env), stdout=fo, stderr=fe,
                                       input=stdin_data, text=True,
                                       timeout=args.timeout or None, env=go_env)
                 rc = proc.returncode
@@ -478,11 +517,8 @@ def cmd_run(args):
         ok, reasons = check_success(attempt_out, expected_user_text=prompt_text)
         if rc != 0:
             print(f"   ❌ 进程退出码 {rc}，重试")
-        if ok and getattr(args, "task_type", None):
-            task_issues = validate_task(
-                env, snapshot, args.task_type,
-                getattr(args, "verify_cmds", "") or "", go_env,
-            )
+        if ok and task_type:
+            task_issues = validate_task(work_env, work_snapshot, task_type)
             if task_issues:
                 print("   ❌ 任务结果校验失败: " + "; ".join(task_issues))
                 ok = False
@@ -501,6 +537,24 @@ def cmd_run(args):
                 print("   请确认 ~/.claude/projects/（或 CLAUDE_CONFIG_DIR/projects/）下存在该 session 的 jsonl；")
                 print("   交付必须用原始轨迹文件，不能用 stdout 捕获拼装的文件。")
                 sys.exit(2)
+            policy_issues = trajectory_policy_issues(native, work_env)
+            if policy_issues:
+                print("   ❌ 轨迹守卫失败: " + "; ".join(policy_issues))
+                ok = False
+                reasons = policy_issues
+                sid = ""
+            if not ok:
+                if attempt_out != out:
+                    keep = out.with_suffix(out.suffix + f".fail{attempt}")
+                    shutil.copy2(attempt_out, keep)
+                continue
+
+            sync_business_back(work_env, env)
+            if test_manifest(env) != baseline_tests:
+                rollback(env, snapshot)
+                print("   ❌ 同步业务改动后测试文件与基线不一致，已回滚")
+                sys.exit(2)
+
             final = out.parent / f"{sid}.jsonl"
             shutil.copy2(native, final)
             stream_keep = out.parent / f"{sid}.stream.jsonl"
@@ -509,6 +563,18 @@ def cmd_run(args):
             if out.exists() and out.resolve() not in (final.resolve(), stream_keep.resolve()):
                 out.unlink()
             print(f"✅ 轨迹已保存（Claude Code 原始 session 文件）: {final}")
+            print("✅ 守卫通过：无越界访问、无测试接触、无测试文件变更")
+            evidence_dir = out.parent / "_evidence"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            (evidence_dir / "trajectory_guard.json").write_text(
+                json.dumps({
+                    "session_id": sid,
+                    "result": "passed",
+                    "tests_visible": False,
+                    "outside_workspace_access": False,
+                }, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             print(f"   （stream 校验副本: {stream_keep.name}，来源: {native}）")
             return
         print(f"   ❌ 未成功: {'; '.join(reasons) if reasons else '未知'}")
@@ -548,9 +614,9 @@ def main():
     c.add_argument("--module-path", help="Go module 相对 env 的子目录（如 backend），缺省自动探测")
     c.add_argument("--no-pin-go", action="store_true", help="跳过 Go 版本钉死（不推荐）")
     c.add_argument("--task-type", choices=["bugfix", "diagnosis"], help="任务类型；提供后跑完会做任务结果校验")
-    c.add_argument("--verify-cmds", help="bugfix 的验收命令；配合 --task-type bugfix 使用，失败会重跑")
+    c.add_argument("--verify-cmds", help="仅用于识别私有目标测试；修复轨迹阶段绝不执行该命令")
+    c.add_argument("--evaluator", help="私有测试目录；缺省为 <project>/evaluator")
     c.add_argument("--lock-timeout", type=int, default=0, help="全局串行锁等待秒数；0 表示一直等")
-    c.add_argument("--skip-red-gate", action="store_true", help="跳过红灯门禁检查（不推荐）")
     c.set_defaults(func=cmd_run)
 
     c = sub.add_parser("check")

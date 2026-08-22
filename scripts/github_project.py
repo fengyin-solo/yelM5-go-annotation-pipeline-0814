@@ -34,8 +34,12 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trajectory_guard import copy_evaluator_to_repo, private_test_issues  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_docker import make_dockerfile, detect_go_version, find_go_mod  # noqa: E402
+from domain_guard import validate_project_domain  # noqa: E402
 
 DEFAULT_CONTEXT = Path.home() / ".codex" / "pg-code" / "github-context.json"
 DEFAULT_REMOTE = "origin"
@@ -332,6 +336,13 @@ def cmd_ensure(args):
     if not Path(args.local_path).is_dir():
         raise RuntimeError(f"local path not found: {args.local_path}")
     base = slugify(args.repo_name)
+    domain_issues = validate_project_domain(Path(args.local_path), base)
+    if domain_issues:
+        raise RuntimeError(
+            "候选项目命中禁止类型，已在创建 GitHub 仓库前停止："
+            + "；".join(domain_issues)
+            + "。必须更换项目，禁止只改仓库名或 README 措辞。"
+        )
     repo_name = assign_repo_name(root, base)
     repo = central_repo_dir(root, repo_name)
     repo.parent.mkdir(parents=True, exist_ok=True)
@@ -384,12 +395,19 @@ def cmd_publish(args):
     if not (proj / "env").exists():
         raise RuntimeError(f"bug env not found: {proj / 'env'}")
 
+    collection_data = {}
+    coll = proj / "collection.json"
+    if coll.exists():
+        collection_data = json.loads(coll.read_text(encoding="utf-8"))
+    private_issues = private_test_issues(
+        proj / "env", proj / "evaluator", collection_data.get("verify_cmds") or ""
+    )
+    if private_issues:
+        raise RuntimeError("私有测试门禁失败：" + "；".join(private_issues))
+
     bug_id = args.bug_id
     if not bug_id:
-        coll = proj / "collection.json"
-        if coll.exists():
-            data = json.loads(coll.read_text(encoding="utf-8"))
-            bug_id = data.get("bug_id") or ""
+        bug_id = collection_data.get("bug_id") or ""
     if not bug_id:
         raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
 
@@ -432,7 +450,7 @@ def cmd_publish(args):
 
 
 def cmd_push_fix(args):
-    """bugfix 题轨迹质检通过后，把测试模型修复后的 env/ 作为新 commit 推到 bug-<record>。
+    """bugfix 题验收通过后，先推模型修复 commit，再单独推目标测试 commit。
 
     复用 sync_worktree（防泄漏排除）+ ensure_delivery_files（重建交付三件套），
     替代原来手动 rsync --delete 的做法——手动命令会把根目录交付文件一并删掉。
@@ -450,6 +468,7 @@ def cmd_push_fix(args):
     coll = proj / "collection.json"
     bug_id = args.bug_id
     task_type = ""
+    data = {}
     if coll.exists():
         data = json.loads(coll.read_text(encoding="utf-8"))
         bug_id = bug_id or data.get("bug_id") or ""
@@ -458,16 +477,34 @@ def cmd_push_fix(args):
         raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
     if task_type == "diagnosis":
         raise RuntimeError("diagnosis 题不推测试模型 fix：bug 分支必须保持埋好 bug 的代码")
+    evaluator = proj / "evaluator"
+    private_issues = private_test_issues(env_dir, evaluator, data.get("verify_cmds") or "")
+    if private_issues:
+        raise RuntimeError("私有测试门禁失败：" + "；".join(private_issues))
 
     # 绿灯门禁：只有绿灯确认过的修复才推上 GitHub，避免无效修复 commit 进交付分支。
-    if not getattr(args, "force", False):
-        ev = proj / "_evidence"
-        missing = [p.name for p in (ev / "verify_green.jsonl", ev / "verify_result.json") if not p.exists()]
-        if missing:
-            raise RuntimeError(
-                "绿灯验收未完成（缺少 _evidence/" + "、_evidence/".join(missing) + "）。"
-                "请先运行 run_evidence_trajectories.py generate --phase green 通过绿灯再推送；确需强推用 --force（不推荐）。"
-            )
+    ev = proj / "_evidence"
+    required = (
+        ev / "trajectory_guard.json",
+        ev / "verify_green.jsonl",
+        ev / "verify_result.json",
+        ev / "green_regression.json",
+    )
+    missing = [p.name for p in required if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "绿灯验收未完成（缺少 _evidence/" + "、_evidence/".join(missing) + "）。"
+            "请先运行 run_evidence_trajectories.py generate --phase green 通过绿灯和全量回归再推送。"
+        )
+    guard = json.loads((ev / "trajectory_guard.json").read_text(encoding="utf-8"))
+    regression = json.loads((ev / "green_regression.json").read_text(encoding="utf-8"))
+    expected_sid = (data.get("session_id") or "").strip()
+    if guard.get("result") != "passed" or guard.get("tests_visible") is not False:
+        raise RuntimeError("正式轨迹守卫结果无效，拒绝推送")
+    if expected_sid and guard.get("session_id") != expected_sid:
+        raise RuntimeError("正式轨迹守卫 session_id 与 collection.json 不一致")
+    if regression.get("result") != "passed":
+        raise RuntimeError("绿灯后全量回归未通过，拒绝推送")
 
     repo = central_repo_dir(root, repo_name)
     if not (repo / ".git").exists():
@@ -494,13 +531,22 @@ def cmd_push_fix(args):
     if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
         raise RuntimeError(f"env 与 {bug_branch} 无差异：bugfix 题测试模型应有修复改动，请确认轨迹质检结论")
     run_git(repo, "commit", "-m", f"fix: {bug_id}", env=identity_env)
-    run_git(repo, "push", DEFAULT_REMOTE, bug_branch, env=identity_env)
     fix_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    copied_tests = copy_evaluator_to_repo(evaluator, repo)
+    run_git(repo, "add", "-A", "--", ".")
+    if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
+        raise RuntimeError("私有目标测试未产生独立改动，拒绝推送")
+    run_git(repo, "commit", "-m", f"test: {bug_id}", env=identity_env)
+    test_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    run_git(repo, "push", DEFAULT_REMOTE, bug_branch, env=identity_env)
     run_git(repo, "checkout", "main")
     print(json.dumps({
         "ok": True,
         "repoUrl": f"{html}/tree/{bug_branch}",
         "fixCommit": f"{html}/commit/{fix_sha}",
+        "testCommit": f"{html}/commit/{test_sha}",
+        "testFiles": copied_tests,
         "bugBranch": bug_branch,
     }, ensure_ascii=False))
 
@@ -532,7 +578,6 @@ def main():
     c.add_argument("--date")
     c.add_argument("--bug-id")
     c.add_argument("--module-path", help="Go module 相对仓库根目录的子目录（如 backend），缺省自动探测")
-    c.add_argument("--force", action="store_true", help="跳过绿灯门禁强制推送（不推荐）")
     c.set_defaults(func=cmd_push_fix)
 
     args = p.parse_args()

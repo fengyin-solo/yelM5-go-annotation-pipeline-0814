@@ -2,6 +2,7 @@
 
 ## 目录
 - 来源与去重
+- 禁止项目与功能点
 - 任务类型与配比
 - 选题与埋 bug 门槛
 - 缺陷分类 bug_category
@@ -17,12 +18,23 @@
 ## 来源与去重
 
 - 选题来源统一为**自己 0-1 生成的项目**，不再去 GitHub/Gitee 找题。
-- 项目与 GitHub 仓库名要**具体到业务**，禁止 `forex`、`task` 这类泛化名；GitHub 仓库名用「领域+用途+类型」拼成 3-5 个英文单词的描述性名字（如 `renovation-budget-expense-service`），不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 字样。
+- 项目与 GitHub 仓库名要**具体到业务**，禁止 `forex`、`task` 这类泛化名；GitHub 仓库名用「领域+用途+类型」拼成 3-5 个英文单词的描述性名字（如 `sensor-telemetry-ingestion-service`），不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 字样。
 - 0-1 项目来源由用户指定：可以是项目生成提示词，也可以是本地项目目录。
 - 去重身份按优先级：**优先 GitHub 仓库地址，其次本地项目绝对路径**。
 - 同一个 repo（GitHub 地址或本地路径任一命中）最多出 30 条记录，每条一个不同 bug。总需求超过 30 条时按 `[30, ..., 余数]` 拆到多个不同的 0-1 项目和 GitHub 仓库，仓库数为 `ceil(总条数 / 30)`。
 - 同一个 bug 只能出一个 task_type：bugfix / diagnosis 二选一，不得同时出两条。
 - 全局注册表唯一事实源是 `used-repositories.json`；每次确认选题后立即 `repo_registry.py register` 登记并 `sync`。
+
+## 禁止项目与功能点（最高优先级）
+
+完整清单与判定方法见 [forbidden-domains.md](forbidden-domains.md)，开始任何编码前必须阅读。
+
+- 审查顺序固定为：项目总体类型 → 本条数据的具体业务功能点 → 最终 `user_query` / `success_criteria` / `gold_root_cause`。任一层命中即淘汰。
+- 查账 / 账务和订单类是最高优先级硬禁区；其他禁区包括清单中的游戏图形、平台业务系统、本地桌面工具、数据可视化和前端页面。
+- 项目允许不代表其中所有功能都允许。例如允许项目里的库存调拨、财务核对、预约或工单功能仍然不能出题。
+- 禁止关键词规避。若核心实体、主流程或用户目标在语义上等价，改名、删词、换同义词后仍判不合格。
+- 在生成项目、建仓和埋错前分别运行 `domain_guard.py`；`github_project.py ensure` 会在创建 GitHub 仓库前检查候选仓库名、项目目录名与根 README。
+- 题面阶段再次运行 `check_prompt_duplicates.py`，填表和 `post_qc.py` 还会复查。若此时命中禁止类型，必须回到功能点阶段换题，不能只改题面。
 
 ## 任务类型与配比
 
@@ -35,12 +47,13 @@
 
 ## 选题与埋 bug 门槛
 
-1. 0-1 项目能 `go build ./...` 通过，是真实可运行的项目。
-2. repo 尚未用满 30 条记录，且当前 bug 未在本 repo 出现过。
-3. 埋的 bug 能稳定复现，并能反推出文件、符号、失效机制三项。
-4. 版本固定、可重复构建，Go toolchain 版本已确定。
-5. 与改动半径相关的既有测试可运行，可用作回归。
-6. gold 根因与 gold 修复不进入测试模型可见环境。
+1. 项目总体类型和本条具体功能点均通过禁止领域人工语义审查与 `domain_guard.py` 最低门禁。
+2. 0-1 项目能 `go build ./...` 通过，是真实可运行的项目。
+3. repo 尚未用满 30 条记录，且当前 bug 未在本 repo 出现过。
+4. 埋的 bug 能稳定复现，并能反推出文件、符号、失效机制三项。
+5. 版本固定、可重复构建，Go toolchain 版本已确定。
+6. 与改动半径相关的既有测试可运行，可用作回归。
+7. gold 根因与 gold 修复不进入测试模型可见环境。
 
 埋 bug 难度按 bug_category 选型：优先 concurrency / nil / slice / error / context / defer 里需要多步定位、强模型也会栽的缺陷；**必须满足「埋错复杂度红线」**（见下节），禁止一眼看出、单字符、单行、单文件、常量改错、go vet 级、改坏测试暴露答案的简单埋错。
 
@@ -74,7 +87,7 @@
 - **复杂 bug 首选同一契约下的机制耦合**：例如 context 传播、重试停止、client 请求绑定和跨请求隔离共同服务于“请求结束后所有工作都应停止”这一份契约。不要把比较方向、不排序、去锁、WaitGroup 错位等互不相关问题硬拼成一道题。
 - **buggy 代码必须能 `go build ./...`**：改动函数后若某个 import 不再被使用（如去掉 `sort.SliceStable` 后 `import "sort"` 悬空），要同步删/加 import，否则整个项目编译失败、红绿校准全部落空。
 - **修复规模始终在本地埋错基线与 `_gold/` 之间测量**，**不要在跑完轨迹后的 `env/` 上量**——env 已被测试模型改回接近 gold，diff 会很小。
-- **diagnosis 也要准备专用复现测试**：必要时先在 baseline 里加一个专门测试（如“重试成功仍为 sent”），再同步到每个 env 与 `_gold`，确保症状稳定可复现、模型有据可查。
+- **diagnosis 也要准备专用复现测试**：目标测试只写入记录根目录的私有 `evaluator/`，校准和红灯证据时注入临时副本；不得同步到 `env/`、`.base_snapshot/` 或 `_gold/`。
 - **不再生成 `SOURCE.txt`**：`workspace.py` 不再在 `_gold/<record>/` 写本地路径；`github_project.py` 的 `sync_worktree` 仍保留 `--exclude=SOURCE.txt` 兜底，禁止手动把任何本地路径/出题人元数据加回 git。
 
 ### 埋错自检清单（出题人逐项确认）
@@ -124,6 +137,9 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 
 ## 防泄漏清单
 
+- 目标红绿测试只存放在记录根目录的私有 `evaluator/`，并以项目相对路径组织；正式修复轨迹前的 `env/`、`.base_snapshot/` 和 `bug-<record>` 分支均不得包含这些测试。
+- 正式修复轨迹必须在系统临时目录的无测试副本中运行：排除所有 `*_test.go`、`.git`、`evaluator`、`_gold` 和交付线索；成功后只回写非测试业务文件。
+- 不得用 system prompt、append system prompt 或拼接用户题面的方式注入额外轨迹约束文字；模型只收到 `prompt.txt` 原文，防泄漏依靠环境隔离和轨迹审计。
 - 测试模型 workspace 里不能有 `.git` 历史、remote、commit SHA、补丁文件、gold 修复说明。
 - 测试模型 workspace 和 prompt 里不能暴露本技能：不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、技能名等标记。
 - 每个 bug 从干净 `main` 拉独立 `bug-<record>` 分支；本地 `_gold/` 修复态不得同步到远程仓库。
@@ -149,18 +165,18 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 | 检查项 | 通过标准 |
 |--------|---------|
 | 完整性 | 题面到最终回复无中断；只有一轮用户输入；无任何斜杠命令（/model /status 等）；工作区和会话干净 |
-| 结果 | bugfix：质检人独立复跑 verify_cmds 从红到绿、全量无回归；diagnosis：结论命中 gold 根因的文件/符号/机制 |
-| 过程 | 先定位再动手、改完验证；无盲目试错、无改测试凑绿；改动范围与问题相称 |
+| 结果 | bugfix：轨迹四查后在私有副本注入 evaluator，verify_cmds 绿且全量无回归；diagnosis：结论命中 gold 根因的文件/符号/机制 |
+| 过程 | 有读码定位和相称的业务改动；无工作区外访问、无任何测试文件接触、无 Git 历史/私有答案接触 |
 | 指令遵循 | bugfix 真正修好；diagnosis 全程零代码变更（临时复现文件允许但必须自删） |
 
-过程不合格典型情形：没有复现/定位就直接改代码；反复改了又撤；改动范围明显超出问题；通过修改测试/跳过用例/放宽断言让验证变绿；声称读过/跑过但轨迹无对应工具调用；最终回复与轨迹实际做过的事对不上。
+过程不合格典型情形：访问工作区外路径、`.git`、`_gold`、`evaluator` 或其他记录；读取/创建/修改/删除任何测试文件；反复改了又撤；改动范围明显超出问题；最终回复与轨迹实际做过的事对上。
 
 ### 过程硬约束（避免被甲方误判 + 补真问题）
 
 跑轨迹前把这三条写进对测试模型的约束，跑完用 `analyze_trajectory.py` 自检：
 
 1. **读码定位必须显式出现**：读源码/测试优先用 `Read` / `Grep` / `Glob` 工具；用 `Bash cat/sed/grep/head` 读文件也可以，但轨迹里绝不能「完全没有读码动作」。质检会把「无 Read/Grep」直接判成「未定位」，所以要确保定位动作在工具序列里看得见。
-2. **diagnosis 必须实际复现**：诊断题不能只读代码下结论，必须至少跑一次 `go test`（或对应复现命令）看到失败/panic。`success_criteria` 里的「稳定复现」要和轨迹里的真实复现动作对应，否则会被判「未定位 / 结论缺过程」。
+2. **正式轨迹不运行目标红绿测试**：`verify_cmds` 只在私有证据/验收副本中执行。正式轨迹的定位过程依靠读业务代码、build、运行业务程序或其他不依赖目标测试的真实观察。
 3. **同类多处修改要批量做，避免同一文件反复单独 Edit**：例如多处 `%v`→`%w`、多处补锁这类机械修改，用一次 `MultiEdit` 或一次 `Bash sed -i` / `perl -i` 完成，不要对同一个文件连续打 6 次 `Edit`。质检会按「同一文件被写入次数过多」误判成「反复改了又撤」。真正的「反复改撤」定义是：**同一位置（同一段 old_string）被多次 Edit**；同一文件多处不同位置的同类修改不算。
 
 ## 跑轨迹重试与回滚
@@ -170,6 +186,7 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - 单轮强制约定：全程有且仅有一条用户输入，内容就是题面原样；不得追加说明，不得输入任何斜杠命令（`/model`、`/status`、`/clear`、`/help` 等），也不得有运行命令式额外输入。
 - **红灯门禁**：开跑修复轨迹之前必须先跑红灯证据（`run_evidence_trajectories.py generate --phase red`）且达标；红灯不过 = 埋错不合格，回滚重新埋错，不得开跑轨迹。绿灯在质检通过后跑（`--phase green`），验证测试模型修复后的 `env/`。
 - 跑之前确认 `env/` 和 `prompt.txt` 不暴露本技能/答案；`run_trajectory.py` 会自动拦截技能文件与 `repo_url` 等标记。
+- `run_trajectory.py` 还会硬性检查 `evaluator/` 中有目标测试、`env/` 中无该测试，并在无任何 `*_test.go` 的隔离副本中运行。
 - 一次没有成功结束处理就必须回滚到 base 干净态再重跑，禁止在上一次残留改动上继续。
 - **重跑自动归档**：重跑轨迹/红灯/绿灯前，上一轮产物自动迁入 `<project>/_failed_rounds/`（红灯证据与基线快照有效则保留原位），禁止让失败轮次的文件混进新一轮交付。
 - 回滚优先用 `run_trajectory.py run` 自动完成；失败尝试留档 `trajectory.failN.jsonl`。
@@ -187,7 +204,7 @@ bug-<record>    埋好 bug；bugfix 题跑完轨迹后补推 Claude Code 测试�
 - `repo_url` 填 `bug-<record>` 分支地址（bugfix 题该分支最终包含测试模型修复 commit；diagnosis 题保持埋好 bug 的代码）。
 - `bug-<record>` 交付分支必须包含：`benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md`、`.dockerignore`，以及按需的 `BUG_REPRO.md`。**`benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 必须且只能在 GitHub 仓库根目录；不得放在 `backend/` 等模块子目录。**
 - 交付不再打 zip、不再截图，只提交 GitHub `repo_url` 分支地址。
-- **`github_project.py publish` 和 Docker 验证必须在跑轨迹之前完成**；跑轨迹会修改 `env/`。跑完、四查通过**且绿灯验收通过**后，bugfix 题才把 `env/`（测试模型修复）作为新 commit 推到 `bug-<record>`（`push-fix`；只有绿灯确认过的修复才进 GitHub，repo_url 最终包含测试模型 fix）；diagnosis 题不推。禁止把 gold 修复内容混进 `bug-<record>`。
+- **`github_project.py publish` 和 Docker 验证必须在跑轨迹之前完成**；初始 `bug-<record>` 不得包含 `evaluator/` 目标测试。轨迹四查与私有绿灯通过后，`push-fix` 必须先产生 `fix: <bug_id>` 业务修复 commit，再产生 `test: <bug_id>` 目标测试 commit，最后推送；diagnosis 题不推。禁止把 gold 修复内容混进 `bug-<record>`。
 - GitHub 仓库用 `github_project.py ensure` 自动创建 **public** repo（审核方需要能访问）；用 `publish` 推送 Bug 分支并输出 `repoUrl`。
 - GitHub 凭据/作者从 `~/.codex/pg-code/github-context.json` 读取，禁止输出 token。
 
@@ -212,6 +229,7 @@ bug-<record>    埋好 bug；bugfix 题跑完轨迹后补推 Claude Code 测试�
 ## 收集表文案书写规范
 
 - `user_query` / `success_criteria` / `verify_cmds` 三条都要逐条差异化，禁止整批套同一个模板，避免被判为批量 AI 制作；`verify_result` 现为机器生成的 pre_fix/post_fix JSON，不参与文案差异化检查。
+- `user_query`、`success_criteria` 或 `gold_root_cause` 命中 [forbidden-domains.md](forbidden-domains.md) 时，不得通过删词或换同义词继续使用同一功能点；必须回到选题阶段更换业务功能。
 - `user_query` 差异化要点：
   - **纯提示词红线**：只写自然语言提示词，**不写验收/复现/运行指令，不贴命令代码块，也不要求模型跑、执行、重跑或验证测试**；验收命令只放 `verify_cmds` 和红/绿证据阶段。
   - **先定人设再动笔**：每条题面换一个不同的说话人（着急的 / 随口的 / 话少的 / 稍絮叨的 / 半懂不懂的），用人设带出措辞、语气、长短差异；禁止从任何现成句式池里挑句子。
@@ -228,7 +246,7 @@ bug-<record>    埋好 bug；bugfix 题跑完轨迹后补推 Claude Code 测试�
   - `出问题的代码状态下定向命令稳定变红；定位结论说清文件、符号和现象链路；全程不改项目文件，只看公开现象和真实复现。` 属于空泛错误示范，直接判不合格。
   - 合格描述应像「缺失地址的定向检查 20 遍都稳定出现异常回执污染；结论需解释接口值、恢复路径和后续跳过之间的联系；工作区保持原样」，但其中每个业务词都必须替换为本题真实、已复跑且有断言支撑的内容，禁止复用示例本身。
 - `verify_cmds` 要能独立复现红/绿，固定使用唯一目标包、`-run '^TestName$'`、`-count=1`（并发加 `-race`）；测试断言必须完整覆盖 `user_query` 的全部问题描述，但命名与参数顺序不要整批统一。
-- `verify_result` 由红/绿证据轨迹自动生成并回填，需通过「URL 可访问 + session_id 匹配 + result 为 red/green」校验；红灯不达标回滚重新埋错；绿灯跑在**测试模型修复后的 `env/`** 上（不是 `_gold`），不达标说明修复轨迹无效，回滚重跑修复轨迹并重新质检。**bugfix**：`pre_fix`+`post_fix`；**diagnosis**：仅 `pre_fix`。
+- `verify_result` 由红/绿证据轨迹自动生成并回填；绿灯使用“模型修复后 `env/` 的私有副本 + 临时注入的 `evaluator/`”，不是 `_gold`。不达标说明修复轨迹无效，回滚重跑。**bugfix**：`pre_fix`+`post_fix`；**diagnosis**：仅 `pre_fix`。
 - **去 AI 味 + 高中生语言红线**（`user_query` / `success_criteria` 两条共用）：
   - 语言水平按普通高中生：口语化、短句、直白，不写书面腔、不堆专业名词、不总结升华。
   - 不出现「根因」或任何定责/归因表达：`根因`、`原因是`、`问题出在`、`关键在于`、`症结是`、`机制是`、`本质是`、`归根结底`、`这是...导致的` 等一律不写。

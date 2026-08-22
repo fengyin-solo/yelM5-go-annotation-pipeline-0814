@@ -7,7 +7,8 @@
 2. 分别对三条做跨题比对：任意两题的同一字段存在 >= --min-dup 个字符的
    完全相同的连续片段即硬红（verify_cmds 只比较精确测试标识，忽略必需命令骨架）。
 3. 检查 user_query / success_criteria 是否泄露内部缺陷构造过程。
-4. 只读，不修改任何文件。
+4. 检查 user_query / success_criteria 是否命中禁止项目或功能点。
+5. 只读，不修改任何文件。
 """
 import argparse
 import json
@@ -201,6 +202,27 @@ def check_internal_construction(records):
     return bad
 
 
+def check_forbidden_domains(records):
+    """检查题面与验收描述是否落入禁止业务类型。"""
+    from domain_guard import validate_forbidden_domain
+
+    bad = []
+    for record in records:
+        for item in record["texts"]:
+            if item["field"] not in {"user_query", "success_criteria"}:
+                continue
+            for issue in validate_forbidden_domain(item["text"]):
+                bad.append({
+                    "id": record["id"],
+                    "field": item["field"],
+                    "category": issue["category"],
+                    "match": issue["match"],
+                    "source": item["source"],
+                    "path": item["path"],
+                })
+    return bad
+
+
 def find_duplicates(records, min_dup):
     """对四个字段分别做两两最长公共块比对。"""
     from difflib import SequenceMatcher
@@ -256,9 +278,10 @@ def main():
     dups = find_duplicates(records, args.min_dup)
     forbidden = check_forbidden_chars(records)
     internal = check_internal_construction(records)
+    domains = check_forbidden_domains(records)
 
-    if not banned and not dups and not forbidden and not internal:
-        print("去重自检通过：三条文案均未发现被禁模板句、内部构造措辞、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
+    if not banned and not dups and not forbidden and not internal and not domains:
+        print("去重自检通过：三条文案均未发现被禁模板句、内部构造措辞、禁止业务类型、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
         return 0
 
     if banned:
@@ -275,6 +298,11 @@ def main():
         print("\n[硬红] 交付文案泄露内部缺陷构造过程，必须改成程序本身存在问题的叙事：")
         for item in internal:
             print("  - {id}/{field} ({source}): {issue}\n    {path}".format(**item))
+
+    if domains:
+        print("\n[硬红] 题面或验收描述命中禁止业务类型，必须更换功能点，禁止只改写措辞：")
+        for item in domains:
+            print("  - {id}/{field} ({source}): {category} 命中 {match!r}\n    {path}".format(**item))
 
     if dups:
         print("\n[硬红] 任意两题的同一字段存在 >= {} 字连续重复片段:".format(args.min_dup))
