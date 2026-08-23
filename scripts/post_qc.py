@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """后置质检：对一期根目录下所有记录做交付前的最终硬校验。
 
-在整条流水线跑完（轨迹已上传、verify_result 已回填、push-fix 已完成）之后执行。
+在整条流水线跑完（轨迹已上传、verify_result 已回填、finalize 已完成）之后执行。
 只读，不改任何产物；逐条输出 ✅/❌，最后给出汇总，不合格时退出码非 0。
 
 校验项（对应甲方抽检红线）：
@@ -19,6 +19,7 @@
  11. coverage    verify_cmds 为单包、单测试、-count=1，且红灯失败测试真实存在
  12. difficulty  运行时机制、跨层触发、题面症状覆盖和逐文件回退证据齐全
  13. domain      项目名称与交付字段未命中禁止项目/功能点；仍须人工语义审查
+ 14. repository  orphan 分支拓扑、G1/G2/R1 文件树、快照与远程分支安全
 
 用法:
   post_qc.py --root <root> [--date YYYY-MM-DD] [--project <name>__<record>] [--go-version 1.22]
@@ -29,6 +30,7 @@ verify_cmds 必须来自 collection.json，并与红灯证据轨迹中实际执�
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -36,11 +38,35 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trajectory_guard import inject_evaluator, private_test_issues  # noqa: E402
+from trajectory_guard import inject_evaluator, is_test_artifact, private_test_issues, source_manifest  # noqa: E402
+
+
+_REMOTE_CACHE: dict[str, tuple[int, str, str]] = {}
+_REMOTE_CACHE_LOCK = threading.Lock()
+_REMOTE_KEY_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _remote_heads(repo: Path) -> tuple[int, str, str]:
+    key = str(repo.resolve())
+    with _REMOTE_CACHE_LOCK:
+        key_lock = _REMOTE_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        with _REMOTE_CACHE_LOCK:
+            cached = _REMOTE_CACHE.get(key)
+        if cached is None:
+            result = _git(repo, "ls-remote", "--heads", "origin", check=False)
+            cached = (result.returncode, result.stdout, result.stderr)
+            with _REMOTE_CACHE_LOCK:
+                _REMOTE_CACHE[key] = cached
+    return cached
 
 
 def norm(s: str) -> str:
@@ -231,8 +257,139 @@ def verify_result_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool, str]
     return True, "ok"
 
 
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    if check and result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip())
+    return result
+
+
+def _git_tree(repo: Path, revision: str, tests: bool) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in _git(repo, "ls-tree", "-r", revision).stdout.splitlines():
+        meta, path = line.split("\t", 1)
+        if is_test_artifact(path) == tests:
+            result[path] = meta.split()[2]
+    return result
+
+
+def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool, str]:
+    meta_path = proj / "_evidence" / "repository_delivery.json"
+    manifest_path = proj / "_delivery" / "g1_snapshot.json"
+    if not meta_path.is_file() or not manifest_path.is_file():
+        return False, "缺 repository_delivery.json 或 g1_snapshot.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"交付元数据无效: {exc}"
+
+    repo_url = coll.get("repo_url") or ""
+    match = re.match(r"https?://[^/]+/[^/]+/([^/]+)/tree/([^/?#]+)$", repo_url)
+    if not match:
+        return False, "repo_url 必须是 green 分支地址"
+    repo_name, branch = match.groups()
+    record = proj.name.rsplit("__", 1)[-1]
+    green, red = f"bug{record}_green", f"bug{record}_red"
+    if branch != green or meta.get("green_branch") != green or meta.get("red_branch") != red:
+        return False, f"分支命名不符合 {green}/{red}"
+    repo = proj.parents[1] / "_repos" / repo_name
+    if not (repo / ".git").is_dir():
+        return False, f"找不到本地 staging repo: {repo}"
+
+    issues: list[str] = []
+    remote_rc, remote_stdout, _remote_stderr = _remote_heads(repo)
+    if remote_rc != 0:
+        issues.append("无法读取远程分支")
+        remote_refs = {}
+    else:
+        remote_refs = {
+            line.split()[1].split("refs/heads/", 1)[1]: line.split()[0]
+            for line in remote_stdout.splitlines() if "refs/heads/" in line
+        }
+        remote_branches = sorted(remote_refs)
+        illegal = [name for name in remote_branches if not re.fullmatch(r"bug\d{3}_(?:green|red)", name)]
+        if illegal:
+            issues.append("远程存在非 orphan 交付命名分支: " + ", ".join(illegal))
+
+    if _git(repo, "rev-parse", "--verify", green, check=False).returncode != 0:
+        return False, f"缺少 green 分支 {green}"
+    green_count = int(_git(repo, "rev-list", "--count", green).stdout.strip())
+    g2 = _git(repo, "rev-parse", green).stdout.strip()
+    if remote_refs.get(green) != g2:
+        issues.append("repo_url 指向的远程 green 未同步到本地验收提交")
+    if task_type == "diagnosis":
+        g1 = g2
+        if green_count != 1:
+            issues.append("diagnosis green 必须只有 G1 单提交")
+        if _git(repo, "rev-parse", "--verify", red, check=False).returncode == 0:
+            issues.append("diagnosis 不应创建 R1")
+    else:
+        if green_count != 2:
+            issues.append("bugfix green 必须恰好是 G1 -> G2 两个提交")
+        g1 = _git(repo, "rev-parse", f"{green}^").stdout.strip() if green_count >= 2 else ""
+        if _git(repo, "rev-parse", "--verify", red, check=False).returncode != 0:
+            issues.append(f"缺少 red 分支 {red}")
+        else:
+            r1 = _git(repo, "rev-parse", red).stdout.strip()
+            if remote_refs.get(red) != r1:
+                issues.append("远程 red 未同步到本地 R1")
+            if _git(repo, "rev-list", "--count", red).stdout.strip() != "1":
+                issues.append("R1 必须为 orphan 单提交")
+            if _git(repo, "merge-base", green, red, check=False).returncode == 0:
+                issues.append("green/red 分支存在共同祖先")
+            if g1 and _git_tree(repo, g1, False) != _git_tree(repo, r1, False):
+                issues.append("R1 与 G1 的非测试文件不一致")
+            if _git_tree(repo, g2, True) != _git_tree(repo, r1, True):
+                issues.append("G2 与 R1 的验收测试不一致")
+            if not _git_tree(repo, g2, True):
+                issues.append("G2/R1 没有验收测试")
+            if meta.get("g2_commit") != g2 or meta.get("r1_commit") != r1:
+                issues.append("G2/R1 commit 与交付元数据不一致")
+
+    if g1:
+        if _git_tree(repo, g1, True):
+            issues.append("G1 包含测试文件或测试夹具")
+        if meta.get("g1_commit") != g1 or manifest.get("commit") != g1:
+            issues.append("G1 commit 与交付元数据不一致")
+        archive = subprocess.run(["git", "archive", "--format=tar", g1], cwd=repo, capture_output=True)
+        if archive.returncode != 0:
+            issues.append("无法导出 G1 进行快照复核")
+        else:
+            with tempfile.TemporaryDirectory(prefix="go-annotation-g1-qc-") as tmp:
+                with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tf:
+                    members = tf.getmembers()
+                    unsafe = [
+                        member.name for member in members
+                        if member.issym() or member.islnk() or Path(member.name).is_absolute() or ".." in Path(member.name).parts
+                    ]
+                    if unsafe:
+                        issues.append("G1 包含不安全链接/归档路径: " + ", ".join(unsafe[:8]))
+                    else:
+                        tf.extractall(tmp)
+                if not unsafe and source_manifest(Path(tmp)) != manifest.get("files"):
+                    issues.append("G1 实际文件树与 g1_snapshot.json 不一致")
+
+    if meta.get("repo_url") != repo_url:
+        issues.append("collection.repo_url 与交付元数据不一致")
+    if task_type == "bugfix":
+        if meta.get("state") != "finalized" or meta.get("session_id") != (coll.get("session_id") or ""):
+            issues.append("G2/R1 交付状态未绑定本条正式轨迹 session")
+        guard_path = proj / "_evidence" / "trajectory_guard.json"
+        if guard_path.exists() and meta.get("finalized_at"):
+            try:
+                completed = datetime.fromisoformat(json.loads(guard_path.read_text(encoding="utf-8"))["completed_at"])
+                finalized = datetime.fromisoformat(meta["finalized_at"])
+                if finalized < completed:
+                    issues.append("G2/R1 在正式轨迹完成前已创建")
+            except Exception as exc:
+                issues.append(f"无法核对轨迹/finalize 时序: {exc}")
+    return not issues, "；".join(issues) or "orphan 拓扑、G1/G2/R1 文件树与快照均通过"
+
+
 def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     coll = read_collection(proj)
+    schema = int(coll.get("pipeline_schema") or 0)
     task_type = (coll.get("task_type") or "").strip() or "bugfix"
     verify_cmds = coll.get("verify_cmds") or ""
     env = go_env(go_ver)
@@ -340,14 +497,31 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     ok, msg = verify_result_ok(proj, coll, task_type)
     results.append(("evidence", ok, msg))
     guard_path = proj / "_evidence" / "trajectory_guard.json"
+    acceptance_path = proj / "_evidence" / "trajectory_acceptance.json"
     regression_path = proj / "_evidence" / "green_regression.json"
     guard_ok = False
     guard_msg = "缺 trajectory_guard.json"
     if guard_path.exists():
         try:
             guard = json.loads(guard_path.read_text(encoding="utf-8"))
-            guard_ok = (guard.get("result") == "passed" and guard.get("tests_visible") is False and
-                        (not sid or guard.get("session_id") == sid))
+            classification = guard.get("classification", "clean")
+            guard_ok = (
+                guard.get("result") == "passed"
+                and classification == "clean"
+                and guard.get("tests_visible") is False
+                and (not sid or guard.get("session_id") == sid)
+            )
+            if classification == "suspect":
+                review_path = proj / "_evidence" / "trajectory_review.json"
+                if review_path.exists():
+                    review = json.loads(review_path.read_text(encoding="utf-8"))
+                    guard_ok = (
+                        review.get("decision") == "approved"
+                        and review.get("session_id") == guard.get("session_id")
+                        and len((review.get("reason") or "").strip()) >= 20
+                        and guard.get("tests_visible") is False
+                        and (not sid or guard.get("session_id") == sid)
+                    )
             guard_msg = "ok" if guard_ok else "轨迹守卫状态或 session_id 无效"
         except Exception as exc:
             guard_msg = f"轨迹守卫 JSON 无效: {exc}"
@@ -361,6 +535,25 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         guard_ok = guard_ok and regression_ok
         if not regression_ok:
             guard_msg += "；缺少或未通过绿灯后全量回归"
+    if schema >= 2 or acceptance_path.exists():
+        acceptance_ok = False
+        try:
+            acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+            checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), dict) else {}
+            required = {"trajectory_analysis", "regression", "task_semantics"}
+            if task_type == "bugfix":
+                required.add("private_verify")
+            acceptance_ok = (
+                acceptance.get("result") == "passed"
+                and acceptance.get("session_id") == sid
+                and required.issubset(checks)
+                and all(checks[name].get("passed") is True for name in required)
+            )
+        except Exception as exc:
+            guard_msg += f"；自动验收证据无效: {exc}"
+        guard_ok = guard_ok and acceptance_ok
+        if not acceptance_ok:
+            guard_msg += "；缺少或未通过自动轨迹验收"
     results.append(("trajectory_guard", guard_ok, guard_msg))
 
     # 8. diagnosis 零改动
@@ -412,7 +605,18 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         if green_executed_cmds != [verify_cmds]:
             command_errors.append(f"verify_cmds 与绿灯轨迹实际执行命令不一致: collection={verify_cmds!r}; green={green_executed_cmds!r}")
     coverage_errors = verify_issues + command_errors + ([relation_error] if relation_error else [])
-    results.append(("coverage", not coverage_errors, "；".join(coverage_errors) or "命令形态与失败测试已校验；仍须人工逐项核对 user_query 覆盖"))
+    contract_path = proj / "contract_coverage.json"
+    contract_checked = schema >= 2 or contract_path.exists()
+    if contract_checked:
+        from contract_coverage import validate_manifest
+        contract_ok, contract_issues = validate_manifest(proj)
+        if not contract_ok:
+            coverage_errors.extend(contract_issues)
+    coverage_message = (
+        "命令形态、失败测试与 evaluator 契约覆盖已校验"
+        if contract_checked else "命令形态与失败测试已校验（旧 schema 兼容，无契约清单）"
+    )
+    results.append(("coverage", not coverage_errors, "；".join(coverage_errors) or coverage_message))
 
     # 10. 难度审查：机器校验证据完整性，机制真实性仍由 reviewer_notes 的人工审查负责
     from difficulty_review import validate_review
@@ -437,6 +641,9 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         "；".join(domain_issues) if domain_issues else "关键词门禁通过；仍须人工确认项目与功能点语义不在禁区",
     ))
 
+    repository_ok, repository_msg = repository_delivery_ok(proj, coll, task_type)
+    results.append(("repository", repository_ok, repository_msg))
+
     return results
 
 
@@ -447,6 +654,7 @@ def main():
     ap.add_argument("--project")
     ap.add_argument("--go-version", help="强制 Go 主版本（如 1.22），缺省从 go.mod 读取")
     ap.add_argument("--verify-cmds", help=argparse.SUPPRESS)
+    ap.add_argument("--workers", type=int, default=3, help="本地记录并发数（默认 3）")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -456,13 +664,19 @@ def main():
         sys.exit(1)
 
     print(f"后置质检：共 {len(projects)} 条记录\n")
-    all_ok = True
-    for proj in projects:
+    def inspect(proj: Path):
         go_ver = args.go_version or detect_go_version(proj / "env") or detect_go_version(proj)
         coll = read_collection(proj)
         task_type = (coll.get("task_type") or "bugfix").strip()
+        return proj, task_type, check_record(proj, go_ver, args)
+
+    workers = max(1, min(args.workers, len(projects)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="post-qc") as pool:
+        inspected = list(pool.map(inspect, projects))
+
+    all_ok = True
+    for proj, task_type, results in inspected:
         print(f"== {proj.name}  ({task_type}) ==")
-        results = check_record(proj, go_ver, args)
         for key, ok, msg in results:
             print(f"   [{'✅' if ok else '❌'}] {key:10s} {msg}")
             if not ok:

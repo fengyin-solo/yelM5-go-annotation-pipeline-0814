@@ -137,14 +137,14 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 
 ## 防泄漏清单
 
-- 目标红绿测试只存放在记录根目录的私有 `evaluator/`，并以项目相对路径组织；正式修复轨迹前的 `env/`、`.base_snapshot/` 和 `bug-<record>` 分支均不得包含这些测试。
+- 目标红绿测试只存放在私有 `evaluator/`；正式轨迹前的 G1 不得包含任何测试文件、夹具目录或 test/spec 资产。
 - 正式修复轨迹必须在系统临时目录的无测试副本中运行：排除所有 `*_test.go`、`.git`、`evaluator`、`_gold` 和交付线索；成功后只回写非测试业务文件。
 - 不得用 system prompt、append system prompt 或拼接用户题面的方式注入额外轨迹约束文字；模型只收到 `prompt.txt` 原文，防泄漏依靠环境隔离和轨迹审计。
-- 测试模型 workspace 里不能有 `.git` 历史、remote、commit SHA、补丁文件、gold 修复说明。
+- 测试模型 workspace 必须来自已发布 G1 的单分支快照，且不能有 `.git` 历史、remote、commit SHA、补丁文件、gold 修复说明。
 - 测试模型 workspace 和 prompt 里不能暴露本技能：不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、技能名等标记。
-- 每个 bug 从干净 `main` 拉独立 `bug-<record>` 分支；本地 `_gold/` 修复态不得同步到远程仓库。
-- 测试模型只拿 `bug-<record>` 的源码快照，并去掉 `.git`（或重做成单提交 `snapshot`），看不到任何历史。
-- 并行作业时，每个 bug 独立分支、独立 workspace，禁止多个 bug 混在一个工作区。
+- 远程不得存在 `main`、干净基座或 gold 分支。每个 bug 的 `bug<record>_green` 与 `bug<record>_red` 都用 `--orphan` 独立生根；不同 bug 也不得有共同祖先。
+- 跑轨迹前 green 只有 G1 单提交。bugfix 收题后 green 为 G1→G2，red 为 R1 单提交；G1/R1 非测试树完全一致，G2/R1 验收文件完全一致。
+- 绝不能把原始多分支 repo 交给模型；必须导出 G1 的模型可见快照，用 `g1_snapshot.json` 逐文件验证后再运行。
 - 轨迹质检发现模型 clone 上游 / WebFetch 上游源码按疑似作弊重跑。
 
 ## 验证口径红线
@@ -154,6 +154,7 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - **并发确定性复现硬门禁**：并发 bugfix 的 `repro_determinism` 必须填 `deterministic`；具体同步原语、交错控制、测试钩子或超时边界及稳定性验收事实写入 `success_criteria`，diagnosis 还要在 `gold_root_cause` 写明同一复现策略。只写“多跑几次”“稳定复现”不合格。
 - **轨迹命令一致性硬门禁**：`verify_cmds` 必须与红灯证据轨迹中要求执行、实际执行、最终回复【命令】逐字一致；bugfix 的绿灯证据轨迹也必须逐字一致。不得把 `./internal/service` 改成 `./internal/./service`、不得调整参数顺序或增删等价参数；若命令要改，必须重跑对应证据轨迹。
 - **完整覆盖硬门禁**：逐项对照 `user_query`，目标测试必须能触发并断言其中描述的每个用户可见现象、触发条件和错误结果；遗漏任一项、只覆盖相邻行为、只证明构建失败或只命中局部症状，均判 `verify_cmds` 不合格。
+- **断言契约硬门禁**：正式轨迹前必须用 `contract_coverage.py init/check` 将 evaluator 中每条直接失败断言逐项映射到 `user_query` 的触发/预期原文、`success_criteria` 原文和 `difficulty_review.json` 证据。任何断言无映射或 evaluator 改动后映射过期，均不得调用正式模型。
 - bugfix 必须先跑初始状态红和完整 gold 绿，再逐个回退 `difficulty_review.json` 中至少 4 个功能文件的关键修复；每次都用原样 verify_cmds 重新跑红，随后恢复该文件并确认完整 gold 仍为绿。
 - bugfix 稳定性校准红/绿各重复执行同一条 `-count=1` 定向命令 ≥20 次；不得把 `verify_cmds` 改成 `-count=20`。并发题每次必须保留 `-race`，形成至少 20 次 `-race -count=1` 的真实稳定性证据。
 - 埋错自检必须 20/20 全红，修复后必须 20/20 全绿；连跑 ≥20 遍仍不稳的标 flaky，只做 diagnosis。
@@ -166,14 +167,16 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 |--------|---------|
 | 完整性 | 题面到最终回复无中断；只有一轮用户输入；无任何斜杠命令（/model /status 等）；工作区和会话干净 |
 | 结果 | bugfix：轨迹四查后在私有副本注入 evaluator，verify_cmds 绿且全量无回归；diagnosis：结论命中 gold 根因的文件/符号/机制 |
-| 过程 | 有读码定位和相称的业务改动；无工作区外访问、无任何测试文件接触、无 Git 历史/私有答案接触 |
+| 过程 | 有读码定位和相称的业务改动；无预置验收测试、Git 历史、私有答案或工作区外接触；自建且不交付的复现脚本允许 |
 | 指令遵循 | bugfix 真正修好；diagnosis 全程零代码变更（临时复现文件允许但必须自删） |
 
-过程不合格典型情形：访问工作区外路径、`.git`、`_gold`、`evaluator` 或其他记录；读取/创建/修改/删除任何测试文件；反复改了又撤；改动范围明显超出问题；最终回复与轨迹实际做过的事对上。
+过程不合格典型情形：访问工作区外路径、`.git`、`_gold`、`evaluator` 或其他记录；在读实现定位前读验收测试断言；反复改了又撤；改动范围明显超出问题。
+
+防作弊输出三档：`cheat` 命中直接证据则作废；`suspect` 只允许绑定当前 session_id 的人工复核通过后交付；`clean` 自动放行。模型自建复现脚本不等于接触预置验收测试。
 
 ### 过程硬约束（避免被甲方误判 + 补真问题）
 
-跑轨迹前把这三条写进对测试模型的约束，跑完用 `analyze_trajectory.py` 自检：
+不得把下列约束追加到 system prompt 或 user prompt；由隔离快照、`PreToolUse` 工作区守卫和跑后 `analyze_trajectory.py` 客观实现：
 
 1. **读码定位必须显式出现**：读源码/测试优先用 `Read` / `Grep` / `Glob` 工具；用 `Bash cat/sed/grep/head` 读文件也可以，但轨迹里绝不能「完全没有读码动作」。质检会把「无 Read/Grep」直接判成「未定位」，所以要确保定位动作在工具序列里看得见。
 2. **正式轨迹不运行目标红绿测试**：`verify_cmds` 只在私有证据/验收副本中执行。正式轨迹的定位过程依靠读业务代码、build、运行业务程序或其他不依赖目标测试的真实观察。
@@ -187,24 +190,25 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - **红灯门禁**：开跑修复轨迹之前必须先跑红灯证据（`run_evidence_trajectories.py generate --phase red`）且达标；红灯不过 = 埋错不合格，回滚重新埋错，不得开跑轨迹。绿灯在质检通过后跑（`--phase green`），验证测试模型修复后的 `env/`。
 - 跑之前确认 `env/` 和 `prompt.txt` 不暴露本技能/答案；`run_trajectory.py` 会自动拦截技能文件与 `repo_url` 等标记。
 - `run_trajectory.py` 还会硬性检查 `evaluator/` 中有目标测试、`env/` 中无该测试，并在无任何 `*_test.go` 的隔离副本中运行。
+- `run_trajectory.py` 还会在正式轨迹前强制校验 `contract_coverage.json`；轨迹结束后在相互独立的临时副本并发执行轨迹分析、私有定向验收、全量回归和基线语义检查。任一项失败会立即停止，不盲目重试模型；通过后才同步业务文件并自动绑定 session_id。
 - 一次没有成功结束处理就必须回滚到 base 干净态再重跑，禁止在上一次残留改动上继续。
 - **重跑自动归档**：重跑轨迹/红灯/绿灯前，上一轮产物自动迁入 `<project>/_failed_rounds/`（红灯证据与基线快照有效则保留原位），禁止让失败轮次的文件混进新一轮交付。
 - 回滚优先用 `run_trajectory.py run` 自动完成；失败尝试留档 `trajectory.failN.jsonl`。
 
 ## GitHub 分支与交付
 
-分支模型（默认保留主分支）：
+分支模型（无主分支/干净基座）：
 
 ```text
-main            0-1 干净基线（无 bug）
-bug-<record>    埋好 bug；bugfix 题跑完轨迹后补推 Claude Code 测试模型修复 commit -> 收集表 repo_url
+bug<record>_green  G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
+bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
 ```
 
-- 每个 repo 最多 30 条记录，每条一个 `bug-<record>` 交付分支（record=001…030）。超过 30 条时新建下一个独立 0-1 项目和 GitHub 仓库，并从 001 重新编号。
-- `repo_url` 填 `bug-<record>` 分支地址（bugfix 题该分支最终包含测试模型修复 commit；diagnosis 题保持埋好 bug 的代码）。
-- `bug-<record>` 交付分支必须包含：`benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md`、`.dockerignore`，以及按需的 `BUG_REPRO.md`。**`benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 必须且只能在 GitHub 仓库根目录；不得放在 `backend/` 等模块子目录。**
+- 每个 repo 最多 30 条记录，每条 bugfix 一对 green/red orphan 分支；diagnosis 只有 green G1。
+- `repo_url` 填 `bug<record>_green` 分支地址。
+- green/red 交付分支必须包含根目录 Docker 交付文件及按需的 `BUG_REPRO.md`。
 - 交付不再打 zip、不再截图，只提交 GitHub `repo_url` 分支地址。
-- **`github_project.py publish` 和 Docker 验证必须在跑轨迹之前完成**；初始 `bug-<record>` 不得包含 `evaluator/` 目标测试。轨迹四查与私有绿灯通过后，`push-fix` 必须先产生 `fix: <bug_id>` 业务修复 commit，再产生 `test: <bug_id>` 目标测试 commit，最后推送；diagnosis 题不推。禁止把 gold 修复内容混进 `bug-<record>`。
+- **`publish` 和 Docker 验证必须在跑轨迹前完成**；轨迹前只允许 G1。轨迹与私有绿灯通过后由 `finalize` 一次创建 G2/R1；禁止把 gold 修复内容混入任何远程分支。
 - GitHub 仓库用 `github_project.py ensure` 自动创建 **public** repo（审核方需要能访问）；用 `publish` 推送 Bug 分支并输出 `repoUrl`。
 - GitHub 凭据/作者从 `~/.codex/pg-code/github-context.json` 读取，禁止输出 token。
 
@@ -223,7 +227,7 @@ bug-<record>    埋好 bug；bugfix 题跑完轨迹后补推 Claude Code 测试�
 - 生成时机：红绿校准确认基线为红、Docker 验证 bug 环境并实际触发错误之后。
 - 存放位置：`<project>/BUG_REPRO.md`（项目记录目录，**不在 env/ 内**）。
 - 内容只基于 bug base，不写 gold 修复方案、不改写错误信息。
-- 发布 GitHub 时由 `github_project.py publish` 把它提交到 `bug-<record>` 交付分支。
+- 发布 GitHub 时由 `github_project.py publish` 把它提交到 orphan green G1；模型快照仍会排除该文件。
 - 测试模型运行的 `env/` 快照里不得出现该文件，避免泄题。
 
 ## 收集表文案书写规范

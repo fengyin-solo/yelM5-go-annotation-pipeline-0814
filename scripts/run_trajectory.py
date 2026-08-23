@@ -19,20 +19,25 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from serial_lock import test_model_lock  # noqa: E402
+from contract_coverage import validate_manifest  # noqa: E402
+from trajectory_acceptance import run_acceptance  # noqa: E402
 from trajectory_guard import (  # noqa: E402
     copy_without_tests,
     private_test_issues,
     sync_business_back,
     test_manifest,
-    trajectory_policy_issues,
+    source_manifest_issues,
+    trajectory_policy_report,
 )
 
 
@@ -323,7 +328,9 @@ def archive_previous_round(project_dir: Path, reason: str = "rerun") -> Path | N
     ev = project_dir / "_evidence"
     if ev.exists():
         for p in ev.iterdir():
-            if p.is_file() and (p.name.startswith("verify_green") or p.name in {"trajectory_guard.json", "green_regression.json"}):
+            if p.is_file() and (p.name.startswith("verify_green") or p.name in {
+                "trajectory_guard.json", "trajectory_acceptance.json", "green_regression.json",
+            }):
                 candidates.append(p)
         green_env = ev / "green_env"
         if green_env.exists():
@@ -396,6 +403,9 @@ def cmd_run(args):
     verify_cmds = (getattr(args, "verify_cmds", "") or collection.get("verify_cmds") or "").strip()
     evaluator = Path(getattr(args, "evaluator", "") or out.parent / "evaluator").resolve()
     issues.extend(private_test_issues(env, evaluator, verify_cmds))
+    contract_ok, contract_issues = validate_manifest(out.parent)
+    if not contract_ok:
+        issues.extend(f"验收契约覆盖: {issue}" for issue in contract_issues)
     if issues:
         print("❌ 检测到技能/答案泄露风险，拒绝跑轨迹：")
         for i in issues:
@@ -458,6 +468,13 @@ def cmd_run(args):
         for issue in snapshot_issues:
             print("   -", issue)
         sys.exit(1)
+    g1_manifest = Path(args.g1_manifest) if args.g1_manifest else out.parent / "_delivery" / "g1_snapshot.json"
+    manifest_issues = source_manifest_issues(snapshot, g1_manifest)
+    if manifest_issues:
+        print("❌ 基线快照不是已发布 G1 的模型可见文件树，拒绝跑轨迹：")
+        for issue in manifest_issues:
+            print("   -", issue)
+        sys.exit(1)
 
     # 原始 env 先回到基线；正式轨迹在系统临时目录的无测试副本中运行。
     try:
@@ -467,6 +484,9 @@ def cmd_run(args):
         sys.exit(2)
     baseline_tests = test_manifest(env)
     task_type = (getattr(args, "task_type", None) or collection.get("task_type") or "").strip()
+    if task_type not in {"bugfix", "diagnosis"}:
+        print("❌ 正式轨迹必须在 collection.json 或 --task-type 中明确 bugfix/diagnosis")
+        sys.exit(1)
     lock_timeout = getattr(args, "lock_timeout", 0)
     with tempfile.TemporaryDirectory(prefix="go-annotation-trajectory-") as temp_dir:
       temp_root = Path(temp_dir)
@@ -475,6 +495,18 @@ def cmd_run(args):
       copy_without_tests(snapshot, work_snapshot)
       copy_without_tests(snapshot, work_env)
       print(f"🔒 修复轨迹将在无任何 *_test.go 的隔离副本中运行: {work_env}")
+
+      hook_script = Path(__file__).with_name("pretool_workspace_guard.py").resolve()
+      settings = temp_root / "claude-settings.json"
+      hook_command = " ".join(shlex.quote(value) for value in (
+          sys.executable, str(hook_script), "--workspace", str(work_env),
+      ))
+      settings.write_text(json.dumps({
+          "hooks": {"PreToolUse": [{
+              "matcher": "Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Glob|Grep",
+              "hooks": [{"type": "command", "command": hook_command}],
+          }]},
+      }, ensure_ascii=False, indent=2), encoding="utf-8")
 
       # 测试模型限流：red / green / 修复轨迹必须全局串行；整个重试循环持锁。
       with test_model_lock(timeout=lock_timeout):
@@ -501,6 +533,7 @@ def cmd_run(args):
         if not args.quiet:
             cmd.append("--verbose")
         cmd += ["--output-format", "stream-json"]
+        cmd += ["--settings", str(settings)]
         # 防作弊：默认禁用会让测试模型拿到上游修复 commit 的工具/命令
         if args.disallowed_tools:
             cmd += ["--disallowedTools"] + list(args.disallowed_tools)
@@ -517,6 +550,8 @@ def cmd_run(args):
         ok, reasons = check_success(attempt_out, expected_user_text=prompt_text)
         if rc != 0:
             print(f"   ❌ 进程退出码 {rc}，重试")
+            ok = False
+            reasons = [f"Claude 进程退出码 {rc}", *reasons]
         if ok and task_type:
             task_issues = validate_task(work_env, work_snapshot, task_type)
             if task_issues:
@@ -537,17 +572,41 @@ def cmd_run(args):
                 print("   请确认 ~/.claude/projects/（或 CLAUDE_CONFIG_DIR/projects/）下存在该 session 的 jsonl；")
                 print("   交付必须用原始轨迹文件，不能用 stdout 捕获拼装的文件。")
                 sys.exit(2)
-            policy_issues = trajectory_policy_issues(native, work_env)
-            if policy_issues:
-                print("   ❌ 轨迹守卫失败: " + "; ".join(policy_issues))
+            policy_report = trajectory_policy_report(native, work_env)
+            if policy_report["classification"] == "cheat":
+                print("   ❌ 轨迹守卫命中作弊证据: " + "; ".join(policy_report["cheat"]))
                 ok = False
-                reasons = policy_issues
+                reasons = policy_report["cheat"]
                 sid = ""
             if not ok:
                 if attempt_out != out:
                     keep = out.with_suffix(out.suffix + f".fail{attempt}")
                     shutil.copy2(attempt_out, keep)
                 continue
+
+            acceptance = run_acceptance(
+                project=out.parent,
+                workspace=work_env,
+                snapshot=work_snapshot,
+                transcript=native,
+                session_id=sid,
+                task_type=task_type,
+                verify_cmds=verify_cmds,
+                evaluator=evaluator,
+                module_path=(
+                    str(go_mod.parent.relative_to(env))
+                    if go_mod and go_mod.parent != env else None
+                ),
+                env=go_env,
+                timeout=min(args.timeout or 900, 900),
+            )
+            if acceptance["result"] != "passed":
+                print("   ❌ 轨迹后独立验收失败，停止自动重试：")
+                for check_name, check in acceptance["checks"].items():
+                    if not check.get("passed"):
+                        print(f"      - {check_name}: {check.get('output', '')[-1200:]}")
+                print("   题面或修复未覆盖已知契约，必须先修正再发起新的正式轨迹。")
+                sys.exit(1)
 
             sync_business_back(work_env, env)
             if test_manifest(env) != baseline_tests:
@@ -563,18 +622,31 @@ def cmd_run(args):
             if out.exists() and out.resolve() not in (final.resolve(), stream_keep.resolve()):
                 out.unlink()
             print(f"✅ 轨迹已保存（Claude Code 原始 session 文件）: {final}")
-            print("✅ 守卫通过：无越界访问、无测试接触、无测试文件变更")
+            print(f"✅ 轨迹守卫分类: {policy_report['classification']}")
             evidence_dir = out.parent / "_evidence"
             evidence_dir.mkdir(parents=True, exist_ok=True)
             (evidence_dir / "trajectory_guard.json").write_text(
                 json.dumps({
                     "session_id": sid,
-                    "result": "passed",
+                    "result": "passed" if policy_report["classification"] == "clean" else "manual_review_required",
+                    "classification": policy_report["classification"],
+                    "cheat_evidence": policy_report["cheat"],
+                    "suspect_evidence": policy_report["suspect"],
+                    "model_created_tests": policy_report["model_created_tests"],
+                    "blocked_attempts": policy_report.get("blocked_attempts", []),
                     "tests_visible": False,
                     "outside_workspace_access": False,
+                    "g1_manifest": str(g1_manifest),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
                 }, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+            collection["session_id"] = sid
+            collection["pipeline_schema"] = max(int(collection.get("pipeline_schema") or 0), 2)
+            collection_tmp = collection_path.with_suffix(".json.tmp")
+            collection_tmp.write_text(json.dumps(collection, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            collection_tmp.replace(collection_path)
+            print(f"✅ collection.json 已自动绑定 session_id: {sid}")
             print(f"   （stream 校验副本: {stream_keep.name}，来源: {native}）")
             return
         print(f"   ❌ 未成功: {'; '.join(reasons) if reasons else '未知'}")
@@ -616,6 +688,7 @@ def main():
     c.add_argument("--task-type", choices=["bugfix", "diagnosis"], help="任务类型；提供后跑完会做任务结果校验")
     c.add_argument("--verify-cmds", help="仅用于识别私有目标测试；修复轨迹阶段绝不执行该命令")
     c.add_argument("--evaluator", help="私有测试目录；缺省为 <project>/evaluator")
+    c.add_argument("--g1-manifest", help="G1 模型快照清单；缺省为 <project>/_delivery/g1_snapshot.json")
     c.add_argument("--lock-timeout", type=int, default=0, help="全局串行锁等待秒数；0 表示一直等")
     c.set_defaults(func=cmd_run)
 

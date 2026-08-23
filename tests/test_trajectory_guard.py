@@ -12,9 +12,12 @@ from trajectory_guard import (  # noqa: E402
     copy_evaluator_to_repo,
     copy_without_tests,
     private_test_issues,
+    source_manifest_issues,
     sync_business_back,
     test_manifest,
+    trajectory_policy_report,
     trajectory_policy_issues,
+    write_source_manifest,
 )
 
 
@@ -92,12 +95,73 @@ class TrajectoryGuardTest(unittest.TestCase):
         trajectory.write_text(json.dumps(event) + "\n", encoding="utf-8")
         self.assertEqual([], trajectory_policy_issues(trajectory, workspace))
 
+    def test_model_created_test_is_clean(self):
+        workspace = self.root / "work"
+        workspace.mkdir()
+        test_path = workspace / "repro_test.go"
+        trajectory = self.root / "own-test.jsonl"
+        trajectory.write_text("\n".join([
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": str(test_path), "content": "package x"}}]}}),
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": str(test_path)}}]}}),
+        ]), encoding="utf-8")
+        self.assertEqual("clean", trajectory_policy_report(trajectory, workspace)["classification"])
+
+    def test_test_glob_before_business_read_is_suspect(self):
+        workspace = self.root / "work"
+        workspace.mkdir()
+        source = workspace / "service.go"
+        trajectory = self.root / "suspect.jsonl"
+        trajectory.write_text("\n".join([
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Glob", "input": {"pattern": "**/*_test.go"}}]}}),
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": str(source), "old_string": "a", "new_string": "b"}}]}}),
+        ]), encoding="utf-8")
+        self.assertEqual("suspect", trajectory_policy_report(trajectory, workspace)["classification"])
+
+    def test_source_manifest_detects_change(self):
+        visible = self.root / "visible"
+        visible.mkdir()
+        (visible / "main.go").write_text("package main\n", encoding="utf-8")
+        (visible / "hidden_test.go").write_text("package main\n", encoding="utf-8")
+        manifest = self.root / "g1.json"
+        write_source_manifest(visible, manifest, commit="abc", branch="bug001_green")
+        self.assertEqual([], source_manifest_issues(visible, manifest))
+        (visible / "main.go").write_text("package changed\n", encoding="utf-8")
+        self.assertTrue(source_manifest_issues(visible, manifest))
+
     def test_evaluator_is_committed_by_relative_path(self):
         repo = self.root / "repo"
         repo.mkdir()
         copied = copy_evaluator_to_repo(self.evaluator, repo)
         self.assertEqual(["internal/flow/target_test.go"], copied)
         self.assertTrue((repo / "internal" / "flow" / "target_test.go").exists())
+
+    def test_hook_blocked_outside_attempt_is_not_successful_cheat(self):
+        workspace = self.root / "work"
+        workspace.mkdir()
+        trajectory = self.root / "blocked.jsonl"
+        trajectory.write_text("\n".join([
+            json.dumps({"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "id": "call-1", "name": "Read",
+                "input": {"file_path": "/tmp/private.go"},
+            }]}}),
+            json.dumps({"type": "user", "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "call-1",
+                "content": "[workspace-guard blocked] workspace-external path",
+            }]}}),
+        ]), encoding="utf-8")
+        report = trajectory_policy_report(trajectory, workspace)
+        self.assertEqual("clean", report["classification"])
+        self.assertEqual(1, len(report["blocked_attempts"]))
+
+    def test_bash_real_external_path_remains_cheat(self):
+        workspace = self.root / "work"
+        workspace.mkdir()
+        trajectory = self.root / "outside.jsonl"
+        trajectory.write_text(json.dumps({"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "call-1", "name": "Bash",
+            "input": {"command": "sed -n '1,5p' /tmp/private.go"},
+        }]}}) + "\n", encoding="utf-8")
+        self.assertEqual("cheat", trajectory_policy_report(trajectory, workspace)["classification"])
 
 
 if __name__ == "__main__":

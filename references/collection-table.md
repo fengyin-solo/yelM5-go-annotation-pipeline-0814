@@ -17,7 +17,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 | bug_id | 描述性命名，如 `项目-缺陷-机制-序号` 或 `姓名-go-日期-序号` |
 | task_type | `bugfix` / `diagnosis`；同一个 bug 只能二选一，不得同时出两条 |
 | bug_category | 只允许以下取值（原样填写）：`concurrency并发问题` / `slice相关问题` / `error异常错误` / `nil相关问题` / `context相关问题` / `defer相关问题` / `其他问题`；优先前六类，确属其他才用 `其他问题` |
-| repo_url | **`bug-<record>` 分支地址**（GitHub `https://github.com/<owner>/<repo>/tree/bug-<record>`）；bugfix 题跑完轨迹后该分支已包含 Claude Code 测试模型的修复 commit，diagnosis 题仍是埋好 bug 的代码 |
+| repo_url | **`bug<record>_green` 分支地址**（GitHub `https://github.com/<owner>/<repo>/tree/bug001_green`）；bugfix 最终 green 为 G1→G2，同 record 的 red 为 orphan R1；diagnosis 只保留 green G1 |
 | go_version | 三段式，ASCII 分号 `;` 分隔：基础镜像 tag + go.mod 指令 + GOTOOLCHAIN |
 | repro_determinism | 只填 `deterministic` / `flaky`；flaky 不做 bugfix |
 | user_query | 纯文本、简短口语化、高中生语言的**纯提示词**：现象 + 人味化废话 + 环境交代 + 任务指令；**不写任何验收/复现/运行命令、不贴命令代码块**（`verify_cmds` 独立维护）；确需展示症状代码时最小复现 ≤3 行；bugfix 明确写「帮我修好」，diagnosis 明确写「先别改代码」；不出现根因/原因，不用「不是...而是...」等 AI 词 |
@@ -41,7 +41,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 - **交付字段统一采用真实故障叙事**：`bug_id`、`user_query`、`gold_root_cause`、`success_criteria` 只描述程序原本存在的问题及其验证结果，不得出现“埋错 / 埋 bug / 人工注入 / 故障注入 / 出题环境 / `_gold` / gold 修复”等内部流程措辞。红灯阶段写“问题存在时 / 修复前 / 当前代码中”，不得写“埋错态 / 埋错环境”。
 - **禁止业务类型不能晚修**：上述描述字段任一命中 [forbidden-domains.md](forbidden-domains.md)，必须废弃当前功能点并重新选题；禁止只删除关键词或改写业务实体后继续填表。
 
-- `repo_url`：填 `bug-<record>` 分支地址；bugfix 题在跑完轨迹并质检后把测试模型修复 commit 推到该分支（分支地址不变，HEAD 变为测试模型 fix），diagnosis 题保持 bug 分支不动。
+- `repo_url`：填 `bug<record>_green` 分支地址；不增 red URL 字段，审核方按同 record 的 `_red` 分支查看 R1。仓库不得有 `main` 或干净基座分支。
 - 当前 Codex 完成的正确修复只保存在本地 `_gold/`，用于红绿校准、难度检查和回归验证，不创建远程分支、不进入收集表。
 - 一个 repo（GitHub 地址或本地路径任一命中）最多 30 条记录，每条一个不同 bug；总需求超过 30 条时拆到多个不同的 0-1 项目和 GitHub 仓库，每仓独立从 001 编号。
 - 同一个 bug 只能出一个 task_type：bugfix 或 diagnosis 二选一。

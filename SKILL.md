@@ -56,12 +56,12 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 
 1. **选题全部用自己的 0-1 生成项目**，不再去 GitHub 找题。
 2. **同一个 repo 最多 30 条数据**，每条一个不同 bug；同一个 bug 只能出 bugfix / diagnosis **二选一**。用户要求超过 30 条时，必须按每仓最多 30 条拆成多个不同的 0-1 项目和 GitHub 仓库，仓库数为 `ceil(总条数 / 30)`。
-3. **repo_url = `bug-<record>` 分支地址**；bugfix 的正式修复轨迹运行时绝不得看到目标红绿测试。轨迹质检和私有绿灯都通过后，先提交模型业务修复，再单独提交 `evaluator/` 中的目标测试；最终分支顺序必须是「Bug 基线 → 模型修复 → 目标测试」。
+3. **repo_url = `bug<record>_green` 分支地址**。跑轨迹前 green 只有 orphan 单提交 G1（Bug 代码、零测试资产）；收题后才在 green 追加 G2（模型修复+验收测试），并创建无共同祖先的 orphan `bug<record>_red` 单提交 R1（G1 业务树+同一测试）。
 4. GitHub 去重身份**优先用 GitHub 地址，其次用本地路径**。
 5. 交付只提交 GitHub `repo_url` 分支地址；不再提交修复 commit 字段，不打 zip、不截图。
 6. Dockerfile 要支持 arm64/amd64，但本流程**实际只验证当前机器平台**。
 7. **BUG_REPRO.md 是每条记录的交付复现说明**，记录 Bug 是什么 / 如何触发 / 错误信息；只进 GitHub 交付分支，不进测试模型的 `env/`。
-8. **GitHub 初始发布和 Docker 验证必须在跑轨迹之前完成**；初始 `bug-<record>` 不得包含 `evaluator/` 目标测试。测试只能在轨迹通过后的私有验收与最后测试 commit 中出现。
+8. **Docker 验证和 G1 发布必须在跑轨迹前完成；G2/R1 只能在轨迹、私有绿灯和全量回归通过后创建**。不得远程发布 `main`、干净基座、gold 或其他可用于反推答案的分支。
 9. **GitHub 仓库名用真实项目名，长度 3-5 个英文单词**：用「领域 + 用途 + 类型」拼成描述性名字（如 `sensor-telemetry-ingestion-service`），既具体又不至于重名；不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 等字样；本地项目名用领域命名，别用 `forex` 这类泛化名。
 10. **`verify_cmds` 对 bugfix / diagnosis 都必填，且只能是目标 Bug 的定向复现命令**：明确写出唯一目标包、精确测试名和 `-count=1`（并发类加 `-race`），禁止 `go test ./...`、通配包、当前目录、多包或拼接全量回归；命令对应的测试必须完整覆盖 `user_query` 描述的全部现象与触发条件。红、绿证据轨迹都必须**只实际执行一次**这条命令，实际 Bash 调用、最终回复【命令】和正式填表的 `verify_cmds` 必须逐字符完全相同，空格、路径写法、引号、参数顺序均不得变化；bugfix 校验红+绿，diagnosis 校验红。
 11. **Bug 难度与修复规模是双重硬门禁**：bugfix 的 gold 修复必须同时改动至少 4 个不同的功能代码文件，并且功能代码增删总行数至少 20 行；`_test.go`、README、文档、注释和交付文件不计数，禁止拆文件或堆无效代码凑数。
@@ -70,17 +70,17 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 
 ## 流程总览（编号与下文章节一一对应）
 
-1. **选题准备** → 0-1 项目来源、全局去重、GitHub repo 基线
+1. **选题准备** → 0-1 项目来源、全局去重、创建空 GitHub repo
 2. **创建记录 workspace** → `workspace.py init / new-project`，每仓建 001–030 记录目录
 3. **环境构建** → 埋 bug（env）+ gold 修复（_gold）+ 本地量改动规模
 4. **题面写作** → 产出 user_query、task_type（含 4.1 难度审查、4.2 去重自检）
 5. **红绿校准** → 产出 verify_cmds、success_criteria、gold_root_cause
 6. **Docker 验证 + 写 BUG_REPRO + 发布 GitHub**（跑轨迹前）→ 产出 repo_url
 7. **无测试跑修复轨迹**（Claude Code 干净 session）→ 脚本用系统临时隔离副本运行，副本中没有任何 `*_test.go`，模型只收到 `prompt.txt` 原文
-8. **轨迹质检四查** → 检查越界/测试接触/业务改动 → 私有绿灯验收 → 先推修复 commit，再推测试 commit
+8. **轨迹质检四查** → `cheat/suspect/clean` 防作弊审计 → 私有绿灯验收 → `finalize` 生成 G2/R1
 9. **填收集表 + 上传轨迹 + 收尾登记** → 产出 collection
 
-> 「附:红/绿证据轨迹」分两个阶段穿插执行：**红灯在第 6→7 步之间**（开考门禁：测试模型实测确认 bug 可复现，不过则重新埋错、不得开跑轨迹）；**绿灯在第 8 步四查通过后、8.1 push-fix 之前**（验收测试模型的修复成果——只有绿灯确认过的修复才推上 GitHub），产出 pre_fix / post_fix JSON 并回填 verify_result；详见文末附录。
+> 「附:红/绿证据轨迹」分两个阶段穿插执行：**红灯在第 6→7 步之间**；**绿灯在第 8 步四查通过后、8.1 finalize 之前**。G2/R1 在 finalize 之前不得存在。
 
 ## 工作区与目录约定（本期根目录 = 调用时的 cwd）
 
@@ -124,10 +124,12 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 | `python3 <skill>/scripts/workspace.py` | 工作区与项目状态：`init` / `new-project` / `list` / `set` / `reject` / `purge` |
 | `python3 <skill>/scripts/pick_bug_pattern.py` | 随机抽取深度埋错模式（P1–P12）：`--category` 过滤 / `--exclude` 排除同 repo 已用 / `--list` |
 | `python3 <skill>/scripts/difficulty_review.py` | 私有难度审查单：`init` 创建模板 / `check` 校验运行时机制、跨层触发、题面覆盖和逐文件回退证据 |
-| `python3 <skill>/scripts/github_project.py` | GitHub public repo 创建与分支管理：`ensure` / `publish` / `push-fix` |
+| `python3 <skill>/scripts/contract_coverage.py` | evaluator 契约覆盖：`init` 提取每条直接失败断言 / `check` 校验题面触发、预期、success_criteria 与难度证据四方映射 |
+| `python3 <skill>/scripts/github_project.py` | GitHub public repo 创建与 orphan 分支管理：`ensure` / `publish` / `finalize` |
 | `python3 <skill>/scripts/collection_table.py` | 收集表填表数据：`new` / `write` / `sync` / `list` |
 | `python3 <skill>/scripts/run_trajectory.py` | 跑轨迹与失败回滚 |
 | `python3 <skill>/scripts/trajectory_guard.py` | 跑前私有测试门禁 + 轨迹越界/测试接触审计 |
+| `python3 <skill>/scripts/trajectory_acceptance.py` | 正式轨迹后的本地并发验收（由 `run_trajectory.py` 调用） |
 | `python3 <skill>/scripts/run_evidence_trajectories.py` | 红/绿证据轨迹：`generate` 生成上传并回填 verify_result / `validate` 校验 |
 | `python3 <skill>/scripts/analyze_trajectory.py` | 轨迹客观检查 |
 | `python3 <skill>/scripts/upload_trajectory.py` | 上传轨迹到 COS 并回填链接 |
@@ -161,7 +163,7 @@ python3 <skill>/scripts/domain_guard.py \
 
 0-1 项目来源由用户指定：可以是项目生成提示词，也可以是本地项目目录。若给的是提示词，先由本流程模型生成完整可运行的 Go 项目；若给的是本地目录，直接使用。
 
-- **0-1 项目必须保留/补写 `README.md`**（项目说明、目录结构、运行与测试命令、环境变量），交付时随代码进 GitHub `main` 与每个 `bug-*` 分支，避免仓库/分支看着空荡荡。
+- **0-1 项目必须保留/补写 `README.md`**（项目说明、目录结构、运行与测试命令、环境变量），交付时随代码进各 bug 的 orphan green/red 分支；不发布可比较的 `main` 基座。
 
 生成/拿到项目后，先确认三件事：
 
@@ -187,7 +189,7 @@ python3 <skill>/scripts/repo_registry.py check <repo|url|local-path> --source au
 - 去重身份按优先级：**GitHub 地址优先，本地路径其次**。
 - 一个 repo 最多 30 条；达到 30 条即永久排除，不得换 bug / 换任务类型继续出。总需求超过 30 条时新建下一个独立 0-1 项目和 GitHub 仓库，不得复制同一本地项目或更换地址绕过上限。
 
-### 1.3 建立 GitHub 仓库基线
+### 1.3 建立空 GitHub 仓库与 staging repo
 
 ```bash
 python3 <skill>/scripts/github_project.py ensure \
@@ -198,18 +200,20 @@ python3 <skill>/scripts/github_project.py ensure \
 
 - 用 `~/.codex/pg-code/github-context.json` 的 GitHub 凭据/作者自动创建 **public** repo（审核方需要能访问）；
 - **GitHub 仓库名直接用真实项目名，3-5 个英文单词**（`--repo-name` 的 slug，如 `sensor-telemetry-ingestion-service`），避免重名；不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 等字样。
-- 把干净 0-1 基线提交到 `main` 并 push；
-- 生成多架构可用的 `benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 与 `.dockerignore`；**前三个文件必须且只允许位于 GitHub 仓库根目录**（即使 `go.mod` 在 `backend/` 等子目录）；
-- 本地 central repo 保存在 `_repos/<repo_name>/`（与 GitHub 仓库同名）。
+- 远程保持空仓，**不创建、不推送 `main` 或干净基座**；
+- 本地 staging repo 保存在 `_repos/<repo_name>/`，只用于构造各个互不相连的 orphan 交付分支；
+- Docker 交付文件在第 6 步发布 G1 时写入每条分支根目录。
 
 GitHub 分支模型：
 
 ```text
-main                    0-1 干净基线（无 bug）
-bug-<record>            埋好 bug；bugfix 最终顺序为 Bug 基线 -> 模型修复 commit -> 目标测试 commit -> repo_url
+bug<record>_green       G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
+bug<record>_red         R1 orphan 单提交（G1 业务树+与 G2 完全相同的验收测试）
 ```
 
-当前 Codex 的正确修复只保存在本地 `_gold/<project>/`，不创建或推送远程 gold 分支。
+每对 green/red 无共同祖先；不同 bug 之间也无共同祖先。当前 Codex 的正确修复只保存在本地 `_gold/<project>/`，不创建或推送远程 gold 分支。
+
+> 旧仓库只要已推送 `main`、干净基座或旧 `bug-*` 分支，就不得继续用于新数据。`publish` 会拒绝这类远程；必须换新的 0-1 项目和 GitHub 仓库，不得删历史后伪装迁移。
 
 ## 第 2 步：创建记录 workspace
 
@@ -257,10 +261,10 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
 
      命令只有在候选功能文件数 ≥4 且增删总行数 ≥20 时退出码为 0；任一条件不达标就重新设计，不得进入红绿校准。该命令只能做机械统计，达标后仍要人工查看 diff，剔除注释、格式化、拆文件和无效代码后再次确认有效功能代码仍 ≥20 行。最终复核仍对比本地埋错基线与 `_gold/`；**不要在跑完轨迹后的 env 上量**（env 已被测试模型改回接近 gold，diff 会很小）。
    - **难度审查必须在题面完成后、红绿校准前通过**：先运行 `difficulty_review.py init` 创建私有审查单，填写主/次机制、触发顺序、跨层范围、题面症状与测试断言映射；bugfix 还要逐个回退至少 4 个修复文件的关键改动，并确认每次定向测试重新变红。审查单只放记录根目录，不进 `env/`、不交给测试模型。
-   - **目标测试只能写入 `<project>/evaluator/`**，并按它最终进入 Repo 的相对路径存放（例如 `evaluator/internal/foo/retry_test.go`）。`env/`、`.base_snapshot/` 和初始 `bug-<record>` 不得包含该测试。
+   - **目标测试只能写入 `<project>/evaluator/`**，并按它最终进入 Repo 的相对路径存放。G1 和正式轨迹快照中不得有任何测试文件、`test/tests/testdata/evaluator` 夹具目录或常见 test/spec 文件；验收测试只在收题后的 G2/R1 出现。
 2. **在 `_gold/<name>__<record>/` 里写 gold 修复**：
    - 这是**执行本流程的模型（当前 Codex）自己写的正确修复**。
-   - 不是 Claude Code 测试模型后来生成的修复；测试模型的修复只存在于轨迹及最终 `bug-<record>` 的补推 commit 中。
+   - 不是 Claude Code 测试模型后来生成的修复；测试模型的修复只存在轨迹和收题后的 G2 中。
 3. 验证 bug 可复现、gold 修复后行为正确；校准时只在临时副本中注入 `evaluator/`，不得把测试回写到 `env/` 或 `_gold/`。
 4. 确保 `env/` 和 `_gold/` 都没有 `.git` 历史、remote、补丁文件或答案线索；`env/` 内尤其不能有本技能相关文件（`SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`）。
 
@@ -318,6 +322,10 @@ python3 <skill>/scripts/difficulty_review.py init \
   --project <project> --pattern-id <P1-P12> --task-type <bugfix|diagnosis>
 # 填写 <project>/difficulty_review.json 后：
 python3 <skill>/scripts/difficulty_review.py check --project <project>
+
+# 提取 evaluator 中每条直接失败断言，填写四方精确片段后校验：
+python3 <skill>/scripts/contract_coverage.py init --project <project>
+python3 <skill>/scripts/contract_coverage.py check --project <project>
 ```
 
 - `primary_runtime_mechanism` 必须是运行时机制，`coupled_runtime_mechanisms` 至少 1 项且不能与主机制相同。
@@ -327,6 +335,7 @@ python3 <skill>/scripts/difficulty_review.py check --project <project>
 - `query_evidence` 的触发与预期片段、`symptom_coverage` 的至少 2 个症状片段必须逐字来自 `user_query`；每个症状都写明目标测试中的对应断言。
 - bugfix 的 `repair_ablation_checks` 至少列 4 个不同功能 Go 文件。逐个暂时回退该文件的关键修复、执行原样 `verify_cmds`，只有每次都重新变红才能填 `result: "red"`；完成后恢复 gold。
 - `manual_reviewed` 只能在真实审阅代码、diff 和复跑结果后设为 `true`。脚本只校验证据结构，不能代替人工判断机制是否真实。
+- `contract_coverage.json` 中每条 evaluator `Fatal/Fatalf/Error/Errorf` 都必须映射到题面触发片段、题面预期片段、`success_criteria` 片段和 `difficulty_review.json` 证据片段。evaluator 改动会改变断言 ID，旧映射立即失效，禁止带着不完整题面进入正式轨迹。
 
 ### 4.2 题面去重自检（必做）
 
@@ -380,7 +389,7 @@ python3 <skill>/scripts/check_prompt_duplicates.py --root .
 
 ## 第 6 步：Docker 验证 + 写 BUG_REPRO + 发布 GitHub（跑轨迹前）
 
-> 必须在跑轨迹前完成初始发布（`bug-<record>`=不含目标测试的 Bug 代码）。bugfix 题在轨迹质检和私有绿灯通过后，先推 `env/` 业务修复 commit，再推 `evaluator/` 目标测试 commit；diagnosis 题保持 `bug-<record>` 不动。绝不能把本地 `_gold/` 修复内容混进分支。
+> 必须在跑轨迹前发布 orphan `bug<record>_green` G1：恰好一个无父提交，含 Bug 代码且无任何测试资产。此时 G2 和 R1 绝对不得存在。
 
 ### 6.1 Docker 本机验证
 
@@ -414,9 +423,10 @@ python3 <skill>/scripts/github_project.py publish \
 脚本会：
 
 - 先硬性检查 `evaluator/` 中的目标测试不存在于 `env/`；
-- 把不含目标测试的 `env/` 加上交付文件提交到 `bug-<record>`；
+- 用 `git checkout --orphan` 创建 `bug<record>_green`，把排除所有 `*_test.go` 的 `env/` 与交付文件写成 G1 单提交；
 - **强制校验** `benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 均在仓库根目录；若旧版在模块子目录留下同名副本，脚本会清理后再发布；
-- 输出 `repoUrl`（填 `repo_url`）；本地 `_gold/` 不提交到 GitHub。
+- 写入 `<project>/_delivery/g1_snapshot.json`，记录模型可见文件的 SHA-256；`run_trajectory.py` 必须逐文件匹配该清单才能开跑；
+- 输出 green `repoUrl`（填 `repo_url`）；本地 `_gold/` 不提交到 GitHub。
 
 > 注意：`BUG_REPRO.md` 只进 GitHub 交付分支，测试模型的 `env/` 里没有这个文件。
 
@@ -428,8 +438,10 @@ python3 <skill>/scripts/github_project.py publish \
 - **不能暴露本技能/答案线索（红线）**：`env/` 和 `prompt.txt` 中不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、本技能名等标记；`run_trajectory.py` 会在跑之前自动检查并拒绝。
 - **单轮强制约定（红线）**：全程有且仅有**一条用户输入**，内容就是 `prompt.txt` 原样；不得追加任何说明、不得输入任何斜杠命令（`/model`、`/status`、`/clear`、`/help` 等），也不得有任何“运行命令式”的额外输入。出现第二条用户消息或任意斜杠命令即不合格，必须回滚重跑。
 - **不注入任何额外约束文字（红线）**：不使用 `--system-prompt` / `--append-system-prompt`，不向题面拼接“不得读测试”等专门说明。轨迹文件中只能看到 `prompt.txt` 原文；隔离与限制完全由脚本实现。
-- **无测试隔离运行（红线）**：`run_trajectory.py` 将在系统临时目录中生成排除所有 `*_test.go`、`.git`、`evaluator`、`_gold` 和交付线索的副本。模型不在原 `env/` 上直接运行，成功后只回写非测试业务文件。
-- **正式轨迹不执行 `verify_cmds`（红线）**：模型可以 build、运行业务程序或做普通定位，但目标红绿测试只在之后的私有验收阶段注入和执行。成功轨迹必须产生 `_evidence/trajectory_guard.json`。
+- **G1 单分支快照隔离（红线）**：`run_trajectory.py` 将校验快照与 `g1_snapshot.json` 完全一致，再在系统临时目录生成无测试资产、无 `.git`、无交付线索的副本。绝不把原始多分支 repo 交给模型。
+- **工具执行前越界守卫（红线）**：脚本通过 Claude `PreToolUse` hook 在 Bash/Read/Edit/Write/Glob/Grep 真正执行前拦截工作区外、`.git`、`_gold`、`evaluator`和证据目录。不向 system prompt 或 user prompt 注入任何文字；轨迹会区分“已被 hook 拦截的尝试”与“实际越界成功”。
+- **模型正式轨迹不执行 `verify_cmds`（红线）**：模型可以 build、运行业务程序或做普通定位，但目标测试不对模型可见。模型结束后，脚本才在独立临时副本注入 evaluator 执行验收。
+- **自动验收后才同步**：一轮模型成功结束后，本地并发执行轨迹分析、私有 `verify_cmds`、`go test ./...`和任务语义/基线 diff，写入 `_evidence/trajectory_acceptance.json`。任一项失败立即停止，显示原始断言，不消耗后续模型重试；全部通过后才同步 `env/`并自动绑定 `collection.json.session_id`。
 - 无头模式轨迹最干净，并且必须把 `prompt.txt` 原文作为唯一一条 user 消息回放进轨迹，保证轨迹文件内能看到题面原文（下面的 stdout 重定向只是运行时校验用，交付文件由脚本从 `~/.claude/projects/` 取原始 session 文件）：
 
 ```bash
@@ -463,7 +475,7 @@ python3 <skill>/scripts/trajectory_guard.py preflight \
 - `env/` 没有 `.git` 时，脚本用 `.base_snapshot` 做回滚基线：**已有快照（红灯门禁阶段生成）一律复用、绝不覆盖**——重跑时 env 里是上一轮模型的改动，覆盖会把污染代码拍成基线；快照不存在才从当前 env 创建。
 - **重跑自动归档**：`run_trajectory.py run` 开跑前会把上一轮的主轨迹（`<uuid>.jsonl` / `*.stream.jsonl`）、`trajectory.*` 临时/失败/日志文件和绿灯产物自动迁入 `<project>/_failed_rounds/<时间戳>-rerun/`，不污染本轮；红灯证据与基线快照仍然有效，保留原位。红灯/绿灯重跑时同样各自归档上一轮产物（`-red-retry` / `-green-retry`）。
 - 失败的尝试留档为 `<project>/trajectory.failN.jsonl`。
-- 跑完后项目目录里的交付轨迹**文件名必须是 `<session_id>.jsonl`**（Claude Code 原始 session 文件，脚本自动取出）；三处一致：文件名 == `collection.json` 的 `session_id` == 轨迹内的 `sessionId`。同名 `*.stream.jsonl` 是运行校验副本，不交付。
+- 跑完后项目目录里的交付轨迹**文件名必须是 `<session_id>.jsonl`**（Claude Code 原始 session 文件，脚本自动取出）；脚本自动保证三处一致：文件名 == `collection.json` 的 `session_id` == 轨迹内的 `sessionId`。同名 `*.stream.jsonl` 是运行校验副本，不交付。
 - 跑轨迹期间尽量断网；脚本默认禁 `WebFetch` / `WebSearch` / `Bash(git clone *)` / `Bash(curl *)` / `Bash(wget *)`。
 - **测试模型限流，全局串行（红线）**：修复轨迹、红灯、绿灯都调同一个测试模型，`run_trajectory.py run` 与 `run_evidence_trajectories.py generate` 共用全局锁 `~/.codex/go-annotation-pipeline/test_model.lock`，跑之前会自动排队等待，同一时刻只允许一条测试模型任务在跑。
 
@@ -479,35 +491,45 @@ python3 <skill>/scripts/analyze_trajectory.py <project>/trajectory.jsonl
 |--------|---------|
 | 完整性 | 题面到最终回复无中断；只有一轮用户输入；无任何斜杠命令（/model /status 等） |
 | 结果 | bugfix：质检人独立复跑 verify_cmds 从红到绿、全量无回归；diagnosis：结论命中 gold 根因三要素 |
-| 过程 | 有读码定位和相称业务改动；无越界访问、无任何测试文件接触、无历史/私有答案接触 |
+| 过程 | 有读码定位和相称业务改动；无预置验收测试、Git 历史或私有答案接触；模型自建且不回写交付的复现脚本允许 |
 | 指令遵循 | bugfix 真正修好；diagnosis 全程零代码变更 |
 
 - 模型修复写法与 gold 修复不同是常态，**只验证公开行为**。
 - bugfix 的 `verify_cmds` 必须使用 `-count=1`；稳定性校准重复执行该定向命令 20 次并全部通过，再单独执行 `go test ./...` 检查全量无回归。全量命令不得写入 `verify_cmds`。
 - diff 环境目录与 base 快照，确认只改了该改的文件。
 
-### 8.1 先推模型 fix，再单独推目标测试（bugfix 题）
+防作弊脚本输出三档：
 
-bugfix 题在轨迹四查通过、**且附录绿灯验收通过后**，由脚本先推模型业务修复 commit，再单独推 `evaluator/` 目标测试 commit。脚本会硬性校验 `_evidence/trajectory_guard.json`、`verify_green.jsonl`、`verify_result.json` 和 `green_regression.json`，任一缺失或未通过即拒绝推送；不允许跳过门禁。
+- `cheat`：读取预置验收测试、`.git`/历史 diff、`_gold`、`evaluator` 或工作区外答案线索；直接作废。
+- `suspect`：只能确认枚举/搜索过测试，或最终修改文件在测试搜索后才首次打开；必须人工读轨迹并写 `trajectory_review.json`。
+- `clean`：结论由题面和模型已读的实现代码足以支撑。运行测试查看失败输出、已经读实现后再确认期望、读只描述现象的 README/BUG_REPRO、模型自建复现脚本，本身不算作弊。
+
+`suspect` 人工复核通过时写入：
+
+```json
+{"session_id":"<当前 session_id>","decision":"approved","reason":"<已逐步复核的事实理由>"}
+```
+
+文件路径为 `<project>/_evidence/trajectory_review.json`。`reason` 至少 20 字，不得只写“已确认”。
+
+### 8.1 finalize G2/R1（bugfix 题）
+
+bugfix 题在轨迹审计、自动轨迹验收、私有绿灯和全量回归通过后执行。`finalize` 强制检查 collection / guard / acceptance 三方 session_id 非空且一致，并检查自动验收内的私测、回归、语义与轨迹分析都通过。`clean` 自动放行；`suspect` 必须有绑定 session_id、填写理由的 `_evidence/trajectory_review.json`；`cheat` 不得 finalize。
 
 ```bash
-python3 <skill>/scripts/github_project.py push-fix \
+python3 <skill>/scripts/github_project.py finalize \
   --root . --repo-name <repo_name> \
   --project <name>__<record> --bug-id <bug_id>
 ```
 
-脚本会严格产生两个 commit：
+脚本会：
 
-- checkout `bug-<record>`，把 `env/`（测试模型修复）同步进 central repo 工作区（自动排除 `.git`、`*.jsonl`、日志等）；
-- **自动重建根目录交付文件**（`benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md`、`.dockerignore`、`BUG_REPRO.md`）并校验位置——不要手动 rsync，手动 `--delete` 会把这些根目录文件一并删掉；
-- 先提交 `fix: <bug_id>`，此 commit 只含模型业务修复；
-- 再把 `evaluator/` 按相对路径复制进 Repo，单独提交 `test: <bug_id>`，然后推送；
-- 输出 `fixCommit`、`testCommit` 与 `testFiles`，便于审核提交顺序。
-- `env/` 与 `bug-<record>` 无差异时报错（bugfix 题测试模型应有修复改动）；task_type 为 diagnosis 时直接拒绝。
+- 在 `bug<record>_green` 的 G1 上追加一个 G2，G2 同时含模型功能代码修复和 `evaluator/` 验收文件；
+- 从 G1 文件树创建无父提交的 `bug<record>_red` R1，再加入同一份验收文件；
+- 硬校验 green 恰好两个提交、red 恰好一个提交、两分支无共同祖先、G1/R1 非测试文件逐 blob 一致、G2/R1 验收文件逐 blob 一致；
+- 写入 `_evidence/repository_delivery.json`，绑定 G1/G2/R1 SHA 与本条轨迹 session_id。
 
-- 只同步 `env/`（测试模型修复），**禁止把本地 `_gold/` 内容带进 `bug-<record>`**，否则泄题。
-- diagnosis 题跳过本步：测试模型全程零代码变更，`bug-<record>` 保持埋好 bug 的代码。
-- 补推后 `repo_url` 仍填 `bug-<record>` 分支地址（`/tree/bug-<record>`），其 HEAD 即为测试模型 fix。
+diagnosis 题不执行 finalize，只保留 orphan G1。`push-fix` 仅作旧命令兼容入口，新流程统一使用 `finalize`。
 
 ## 第 9 步：填收集表 + 上传轨迹 + 收尾登记
 
@@ -531,7 +553,7 @@ python3 <skill>/scripts/collection_table.py sync --root .
 - `harness`：必须写生成轨迹的工具名 + 版本号，例如 `Claude Code CLI v2.1.233`；禁止只写 `Claude Code CLI` 或只写模型名。
 - `verify_cmds`：bugfix / diagnosis 都必填；必须与红灯证据轨迹实际执行的唯一 Bash 命令和最终回复【命令】逐字符一致，bugfix 还必须与绿灯的实际命令和最终回复逐字符一致。
 
-- `repo_url`：填 `bug-<record>` 分支地址；bugfix 题在 8.1 依次推送模型修复和目标测试后，该分支 HEAD 是独立测试 commit，其父 commit 是模型修复；diagnosis 题该分支仍是埋好 bug 的代码。
+- `repo_url`：填 `bug<record>_green` 分支地址；bugfix 最终为 G1→G2，diagnosis 只有 G1。red 分支由同一 record 命名可确定导出，不另增收集表字段。
 - `是否同步飞书`：**本技能不填写**，留空。
 - `做题人`、`创建人` 由用户本人填写；`质检结果`、`质检备注` 留给质检人。
 - **必填对照**：bugfix 必填 `verify_cmds` + `verify_result`（`pre_fix`+`post_fix`）；diagnosis 必填 `verify_cmds` + `gold_root_cause` + `verify_result`（仅 `pre_fix`）。
@@ -571,14 +593,14 @@ python3 <skill>/scripts/repo_registry.py register <repo|url> --source auto \
 python3 <skill>/scripts/repo_registry.py sync --root .
 ```
 
-3. 确认已就位：`<project>/<session_id>.jsonl`、`<project>/collection.json`（含 COS 链接）、`<project>/收集表_<project>.xlsx`、GitHub 上的 `repo_url`（bugfix 题的分支已含测试模型修复 commit）。
+3. 确认已就位：`<project>/<session_id>.jsonl`、`collection.json`、项目 xlsx、`_delivery/g1_snapshot.json`、`_evidence/repository_delivery.json`以及 GitHub green/red 分支。
 
 ### 9.4 后置质检（交付前硬校验，交付前必跑）
 
 整期所有记录都完成第 9.1–9.3 步后，在本期根目录执行：
 
 ```bash
-python3 <skill>/scripts/post_qc.py --root .
+python3 <skill>/scripts/post_qc.py --root . --workers 3
 ```
 
 只读、不改产物。逐条输出 ✅/❌，最终汇总；有任何一条不合格就退出码非 0。校验项：
@@ -591,13 +613,16 @@ python3 <skill>/scripts/post_qc.py --root .
 6. **files**：`<session_id>.jsonl` / `BUG_REPRO.md` / `collection.json` 齐全；
 7. **fields**：`collection.json` 必填字段齐全；
 8. **evidence**：`verify_result` 结构、URL、session_id 校验；
-9. **trajectory_guard**：正式修复轨迹守卫通过且 session_id 匹配；bugfix 还必须有通过的绿灯后全量回归标记；
+9. **trajectory_guard**：正式修复轨迹守卫通过且 session_id 匹配；新 schema 还必须有通过的自动轨迹验收，bugfix 必须有绿灯后全量回归标记；
 10. **diagnosis**：diagnosis 题 `env` 与 `.base_snapshot` 零差异；
-11. **coverage**：`verify_cmds` 形态合法，且 `evaluator/` 测试完整覆盖题面；
+11. **coverage**：`verify_cmds` 形态合法，且 `contract_coverage.json` 将 evaluator 每条断言映射到题面、`success_criteria` 和难度证据；
 12. **difficulty**：运行时机制、跨层触发和回退证据齐全；
 13. **domain**：项目与功能点未命中禁止类型。
+14. **repository**：远程无 `main`/干净基座；green/red 为 orphan 拓扑；G1/G2/R1 提交数、业务树、验收文件、G1 快照和 finalize 时序均一致。
 
-> 甲方抽检红线「项目能编译运行 / 运行时机制难度达标 / 修复规模达标 / bug 真实可复现 / verify_cmds 定向且完整覆盖 user_query / verify_cmds 红绿通过 / 项目与功能点不在禁止类型」全部落在这 13 项里；交付前必须全绿。
+> 交付前 14 项必须全绿；其中 repository 是防止模型通过 Git 历史或其他 bug 分支抄到答案的最后硬门禁。
+
+`post_qc.py` 默认用 3 个 worker 并发不同记录的本地 build/私测/回归，输出仍按记录名稳定排序；同一 repo 的远程分支元数据只查一次并复用。旧的已 finalize 记录没有 `pipeline_schema: 2` 时按旧证据兼容复核；新正式轨迹由脚本自动写入 schema 2，不得缺契约和自动验收文件。
 
 ## 腾讯文档粘贴注意
 
@@ -611,8 +636,8 @@ python3 <skill>/scripts/post_qc.py --root .
 - **diagnosis**：只产红灯（仅 `pre_fix`，不出现 `post_fix`），红灯阶段即完成上传与回填。
 
 1. **红灯验证轨迹（pre_fix，开考门禁）**：在私有 `red_env` 临时副本中注入 `evaluator/` 后运行 `verify_cmds`。目标测试不回写 `.base_snapshot/`、`env/` 或 Repo。
-2. **绿灯验证轨迹（post_fix，仅 bugfix）**：正式轨迹四查通过后，复制模型修复后的 `env/` 到私有 `green_env`，注入同一份 `evaluator/` 后执行 `verify_cmds`。绿灯通过后才允许产生修复 commit 和后续测试 commit。
-3. **绿灯后全量回归**：脚本紧接着在同一私有 `green_env` 执行 `go test ./...`，通过后写入 `_evidence/green_regression.json`；`push-fix` 缺少该通过凭据时拒绝推送。
+2. **绿灯验证轨迹（post_fix，仅 bugfix）**：正式轨迹四查通过后，复制模型修复后的 `env/` 到私有 `green_env`，注入同一份 `evaluator/` 后执行 `verify_cmds`。绿灯通过后才允许 finalize G2/R1。
+3. **绿灯后全量回归**：脚本紧接着在同一私有 `green_env` 执行 `go test ./...`，通过后写入 `_evidence/green_regression.json`；`finalize` 缺少该通过凭据时拒绝推送。
 
 > 模型红线：红/绿都用 `claude`（目标模型 `model_hub/glm-52-coding`）；**不生成 gold 修复轨迹**，当前 Codex 的正确修复只保存在本地 `_gold/` 供校准和质检。
 > diagnosis 的红灯复现命令同样来自 `collection.json` 的 `verify_cmds`；`--verify-cmds` 只允许临时校准时覆盖，正式交付前必须写回 collection，且与证据轨迹实际执行的唯一 Bash 命令、最终回复【命令】逐字符一致。不再提供全量测试默认值。
@@ -626,6 +651,8 @@ python3 <skill>/scripts/post_qc.py --root .
 ### 全局串行（红线）
 
 red / green / 修复轨迹都调用同一个限流测试模型，必须全局串行。`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 共用全局锁 `~/.codex/go-annotation-pipeline/test_model.lock`，自动排队等待（`--lock-timeout 0` 表示一直等）。
+
+只有不调用目标模型、不共享可变工作区的本地任务允许并发：代码分析、临时副本中的 evaluator、全量回归、基线 diff 以及不同记录的 post-QC。并发不得删除、抽样或降级任何门禁。
 
 ### 生成并回填 verify_result
 

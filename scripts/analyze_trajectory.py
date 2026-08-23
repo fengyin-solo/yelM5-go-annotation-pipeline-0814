@@ -17,7 +17,7 @@
   - go_version：轨迹内实际 go 版本 vs 收集表 go_version 字段声明版本
   - 声称命令：最终回复里声称执行的 go 命令，是否真的在 Bash 工具调用里出现过
   - 任务语义：bugfix 应有业务改动；diagnosis 应零代码变更
-  - 隔离守卫：不得接触测试、Git 历史、私有答案或工作区外路径
+  - 隔离守卫：预置测试/Git 历史/私有答案接触分为 cheat/suspect/clean
   - 定位过程：轨迹里是否有读码动作（Read/Grep/Glob 或 Bash cat/sed/grep 等）
   - 反复改撤：只在「同一位置被多次 Edit」时提示，同一文件多处同类修改不算
 """
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trajectory_guard import trajectory_policy_issues  # noqa: E402
+from trajectory_guard import is_test_artifact, trajectory_policy_report  # noqa: E402
 
 
 def _declared_go_major_minor(declared: str | None) -> str | None:
@@ -161,7 +161,7 @@ def main():
     print(f"\n== 文件改动（{len(edits)} 次）")
     test_file_touched = False
     for name, fp, _old in edits:
-        is_test = "_test.go" in fp
+        is_test = is_test_artifact(fp)
         test_file_touched = test_file_touched or is_test
         print(f"  {'❌ 动了测试文件!' if is_test else '✅'} {name}: {fp}")
     if not edits:
@@ -241,13 +241,18 @@ def main():
 
     # 正式轨迹不得看到目标红绿测试；复现与验收由私有 evaluator 独立完成。
     workspace = Path(args.workspace_root).resolve() if args.workspace_root else None
-    policy_issues = trajectory_policy_issues(Path(args.path), workspace)
-    for issue in policy_issues:
+    policy = trajectory_policy_report(Path(args.path), workspace)
+    for issue in policy["cheat"]:
         msg = f"❌ 轨迹守卫: {issue}"
         print(f"  {msg}")
         hard_issues.append(msg)
-    if not policy_issues:
-        print("  ✅ 轨迹未接触测试、历史、私有答案或工作区外路径")
+    for issue in policy["suspect"]:
+        msg = f"⚠️ 轨迹守卫: {issue}"
+        print(f"  {msg}")
+        warns.append(msg)
+    print(f"  轨迹防作弊分类: {policy['classification']}")
+    if policy["classification"] == "clean":
+        print("  ✅ 未发现答案泄漏或越界证据")
 
     # 反复改撤：只在「同一位置被多次 Edit」时提示；同一文件多处同类修改不算
     from collections import Counter
@@ -266,8 +271,8 @@ def main():
         if multi:
             print(f"  ℹ️ 同一文件多次 Edit 但均在「不同位置」（属同类型多处修复，非反复改撤）: {multi}")
 
-    if test_file_touched:
-        hard_issues.append("❌ 正式轨迹动了 _test.go，必须作废重跑")
+    if test_file_touched and not policy["model_created_tests"]:
+        hard_issues.append("❌ 正式轨迹修改了非自建 _test.go，必须作废重跑")
 
     print()
     if hard_issues:

@@ -4,18 +4,18 @@
 GitHub 凭据/作者一律读取 pg-code 的 `~/.codex/pg-code/github-context.json`，不读取全局 git
 配置或 shell 环境。安全规则：日志和输出可以出现账号/作者，但禁止输出 token。
 
-分支模型（保留主分支，一个 repo 最多 30 条记录）：
-    main            0-1 干净基线（无 bug）
-    bug-<record>    埋好 bug 的分支      -> 收集表 repo_url（分支地址）
+分支模型（一个 repo 最多 30 条记录）：
+    bug<record>_green  G1 bug 单提交 -> G2 模型修复+测试
+    bug<record>_red    R1 bug 代码+同一测试（orphan 单提交）
 
 本地 `_gold/` 只用于红绿校准、难度检查和回归验证，不创建远程分支。
-测试模型只在“去掉 .git 的 bug 快照”里跑，永远看不到 main 历史或本地修复态。
+每个 bug 的 green/red 都独立生根，不得从 main 或其他 bug 分支派生。
 
 用法:
   github_project.py ensure --root <dir> --repo-name <name> --local-path <clean_project_dir>
   github_project.py publish --root <dir> --repo-name <name> --project <name>__<record> \
       [--date YYYY-MM-DD] [--bug-id <id>]
-  github_project.py push-fix --root <dir> --repo-name <name> --project <name>__<record> \
+  github_project.py finalize --root <dir> --repo-name <name> --project <name>__<record> \
       [--date YYYY-MM-DD] [--bug-id <id>]
 """
 from __future__ import annotations
@@ -24,18 +24,23 @@ import argparse
 import base64
 import json
 import os
-import pathlib
 import re
 import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trajectory_guard import copy_evaluator_to_repo, private_test_issues  # noqa: E402
+from trajectory_guard import (  # noqa: E402
+    copy_evaluator_to_repo,
+    is_test_artifact,
+    private_test_issues,
+    write_source_manifest,
+)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_docker import make_dockerfile, detect_go_version, find_go_mod  # noqa: E402
@@ -143,33 +148,82 @@ def ensure_github_repo(username: str, token: str, repo_name: str) -> str:
     return f"https://github.com/{username}/{repo_name}.git"
 
 
-def rsync_copy(src: Path, dst: Path) -> None:
-    if dst.exists():
-        shutil.rmtree(dst)
+def sync_bug_source(src: Path, dst: Path) -> None:
+    """Sync model-visible source while removing all pre-existing test assets."""
     dst.mkdir(parents=True, exist_ok=True)
     r = subprocess.run([
-        "rsync", "-a", "--delete",
-        "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=build",
-        "--exclude=*.log", "--exclude=*.jsonl", "--exclude=.env", "--exclude=.env.*",
-        "--exclude=.DS_Store",
-        str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/",
-    ], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"rsync failed: {r.stderr[:300]}")
-
-
-def sync_worktree(src: Path, dst: Path) -> None:
-    """把源码目录同步进已有 git repo 的 working tree，保留 dst/.git。"""
-    dst.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run([
-        "rsync", "-a", "--delete",
-        "--exclude=.git", "--exclude=node_modules", "--exclude=dist", "--exclude=build",
+        "rsync", "-a", "--checksum", "--delete",
+        "--exclude=.git", "--exclude=*_test.go", "--exclude=evaluator/",
+        "--exclude=test/", "--exclude=tests/", "--exclude=testdata/",
+        "--exclude=test_*", "--exclude=*_test.*", "--exclude=*.test.*", "--exclude=*.spec.*",
+        "--exclude=node_modules", "--exclude=dist", "--exclude=build",
         "--exclude=*.log", "--exclude=*.jsonl", "--exclude=.env", "--exclude=.env.*",
         "--exclude=.DS_Store", "--exclude=SOURCE.txt", "--exclude=*.source.txt",
         str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/",
     ], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"rsync failed: {r.stderr[:300]}")
+
+
+def clear_worktree(repo: Path) -> None:
+    """Remove only the staging repository worktree, preserving .git."""
+    resolved = repo.resolve()
+    if not (resolved / ".git").is_dir() or resolved.name in {"", ".", ".."}:
+        raise RuntimeError(f"拒绝清理非 Git staging repo: {resolved}")
+    for child in resolved.iterdir():
+        if child.name == ".git":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def delivery_branches(record: str) -> tuple[str, str]:
+    return f"bug{record}_green", f"bug{record}_red"
+
+
+def _branch_exists(repo: Path, branch: str, *, remote: bool = True) -> bool:
+    if run_git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0:
+        return True
+    if remote:
+        result = run_git(repo, "ls-remote", "--exit-code", "--heads", DEFAULT_REMOTE, branch, check=False)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    return False
+
+
+def _remote_branches(repo: Path) -> list[str]:
+    result = run_git(repo, "ls-remote", "--heads", DEFAULT_REMOTE)
+    return sorted(line.split("refs/heads/", 1)[1] for line in result.stdout.splitlines() if "refs/heads/" in line)
+
+
+def _assert_no_tests(repo: Path, revision: str) -> None:
+    names = run_git(repo, "ls-tree", "-r", "--name-only", revision).stdout.splitlines()
+    tests = [name for name in names if is_test_artifact(name)]
+    if tests:
+        raise RuntimeError(f"G1 必须不含任何测试文件/夹: {', '.join(tests[:8])}")
+
+
+def _assert_no_symlinks(repo: Path) -> None:
+    links = [str(path.relative_to(repo)) for path in repo.rglob("*") if ".git" not in path.parts and path.is_symlink()]
+    if links:
+        raise RuntimeError("G1 模型快照不允许符号链接，防止越界读取: " + ", ".join(links[:8]))
+
+
+def _tree_entries(repo: Path, revision: str, *, tests: bool) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in run_git(repo, "ls-tree", "-r", revision).stdout.splitlines():
+        meta, path = line.split("\t", 1)
+        sha = meta.split()[2]
+        if is_test_artifact(path) == tests:
+            result[path] = sha
+    return result
+
+
+def _write_delivery_metadata(proj: Path, data: dict) -> None:
+    target = proj / "_evidence" / "repository_delivery.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 DELIVERY_ROOT_FILES = (
@@ -356,19 +410,10 @@ def cmd_ensure(args):
     author_email = author["email"]
 
     if not (repo / ".git").exists():
-        rsync_copy(Path(args.local_path), repo)
-        ensure_delivery_files(repo, repo_name, None, getattr(args, "module_path", None))
-        run_git(repo, "init", "-b", "main")
+        repo.mkdir(parents=True, exist_ok=True)
+        run_git(repo, "init")
         run_git(repo, "config", "user.name", author_name)
         run_git(repo, "config", "user.email", author_email)
-        env = git_identity_env(os.environ.copy(), author_name, author_email)
-        run_git(repo, "add", "-A", "--", ".")
-        if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
-            raise RuntimeError("clean baseline has no files to commit")
-        run_git(repo, "commit", "-m", f"feat: {repo_name} 0-1 baseline", env=env)
-    else:
-        # 已有 central repo 时也确保 eval Dockerfile 在 main 工作区里。
-        run_git(repo, "checkout", "main", check=False)
 
     remote_url = ensure_github_repo(username, token, repo_name)
     existing = run_git(repo, "remote", "get-url", DEFAULT_REMOTE, check=False)
@@ -377,12 +422,11 @@ def cmd_ensure(args):
     else:
         run_git(repo, "remote", "set-url", DEFAULT_REMOTE, remote_url)
 
-    auth_env = git_auth_env(remote_url, username, token)
-    identity_env = git_identity_env(auth_env, author_name, author_email)
-    run_git(repo, "checkout", "main")
-    run_git(repo, "push", "-u", DEFAULT_REMOTE, "main", env=identity_env)
     html = remote_url[:-4] if remote_url.endswith(".git") else remote_url
-    print(json.dumps({"ok": True, "repoName": repo_name, "repoUrl": html, "localRepo": str(repo)}, ensure_ascii=False))
+    print(json.dumps({
+        "ok": True, "repoName": repo_name, "repoUrl": html, "localRepo": str(repo),
+        "publishedBaseline": False,
+    }, ensure_ascii=False))
 
 
 def cmd_publish(args):
@@ -429,32 +473,52 @@ def cmd_publish(args):
     identity_env = git_identity_env(auth_env, author_name, author_email)
 
     record = proj_name.rsplit("__", 1)[-1] if "__" in proj_name else "001"
-    bug_branch = f"bug-{record}"
+    green_branch, red_branch = delivery_branches(record)
+    forbidden = [name for name in _remote_branches(repo) if not re.fullmatch(r"bug\d{3}_(?:green|red)", name)]
+    if forbidden:
+        raise RuntimeError("远程存在可用于反推答案的非交付分支: " + ", ".join(forbidden))
+    if _branch_exists(repo, green_branch) or _branch_exists(repo, red_branch):
+        raise RuntimeError(
+            f"交付分支已存在: {green_branch}/{red_branch}；拒绝覆盖可审计历史"
+        )
 
-    run_git(repo, "checkout", "main")
-    run_git(repo, "checkout", "-B", bug_branch, "main")
-    sync_worktree(proj / "env", repo)
+    run_git(repo, "checkout", "--orphan", green_branch)
+    clear_worktree(repo)
+    sync_bug_source(proj / "env", repo)
+    _assert_no_symlinks(repo)
     ensure_delivery_files(repo, proj_name, proj / "BUG_REPRO.md", getattr(args, "module_path", None))
     _assert_root_delivery_files(repo)
     run_git(repo, "add", "-A", "--", ".")
     run_git(repo, "commit", "-m", f"bug: {bug_id}", env=identity_env)
-    run_git(repo, "push", "-u", DEFAULT_REMOTE, bug_branch, env=identity_env)
-    repo_url = f"{html}/tree/{bug_branch}"
+    g1_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    if run_git(repo, "rev-list", "--count", green_branch).stdout.strip() != "1":
+        raise RuntimeError("G1 green 分支必须为 orphan 单提交")
+    _assert_no_tests(repo, g1_sha)
+    manifest_path = proj / "_delivery" / "g1_snapshot.json"
+    write_source_manifest(repo, manifest_path, commit=g1_sha, branch=green_branch)
+    run_git(repo, "push", "-u", DEFAULT_REMOTE, green_branch, env=identity_env)
+    repo_url = f"{html}/tree/{green_branch}"
 
-    run_git(repo, "checkout", "main")
+    _write_delivery_metadata(proj, {
+        "schema": 1,
+        "state": "g1_published",
+        "repo_url": repo_url,
+        "green_branch": green_branch,
+        "red_branch": red_branch,
+        "g1_commit": g1_sha,
+        "g1_manifest": str(manifest_path.relative_to(proj)),
+    })
     print(json.dumps({
         "ok": True,
         "repoUrl": repo_url,
-        "bugBranch": bug_branch,
+        "greenBranch": green_branch,
+        "g1Commit": g1_sha,
+        "g1Manifest": str(manifest_path),
     }, ensure_ascii=False))
 
 
-def cmd_push_fix(args):
-    """bugfix 题验收通过后，先推模型修复 commit，再单独推目标测试 commit。
-
-    复用 sync_worktree（防泄漏排除）+ ensure_delivery_files（重建交付三件套），
-    替代原来手动 rsync --delete 的做法——手动命令会把根目录交付文件一并删掉。
-    """
+def cmd_finalize(args):
+    """After acceptance, create G2 and an independent orphan R1."""
     root = Path(args.root)
     base = slugify(args.repo_name)
     repo_name = resolve_repo_name(root, base) or base
@@ -476,7 +540,7 @@ def cmd_push_fix(args):
     if not bug_id:
         raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
     if task_type == "diagnosis":
-        raise RuntimeError("diagnosis 题不推测试模型 fix：bug 分支必须保持埋好 bug 的代码")
+        raise RuntimeError("diagnosis 题只交付 orphan G1，不创建 G2/R1")
     evaluator = proj / "evaluator"
     private_issues = private_test_issues(env_dir, evaluator, data.get("verify_cmds") or "")
     if private_issues:
@@ -486,6 +550,7 @@ def cmd_push_fix(args):
     ev = proj / "_evidence"
     required = (
         ev / "trajectory_guard.json",
+        ev / "trajectory_acceptance.json",
         ev / "verify_green.jsonl",
         ev / "verify_result.json",
         ev / "green_regression.json",
@@ -497,12 +562,34 @@ def cmd_push_fix(args):
             "请先运行 run_evidence_trajectories.py generate --phase green 通过绿灯和全量回归再推送。"
         )
     guard = json.loads((ev / "trajectory_guard.json").read_text(encoding="utf-8"))
+    acceptance = json.loads((ev / "trajectory_acceptance.json").read_text(encoding="utf-8"))
     regression = json.loads((ev / "green_regression.json").read_text(encoding="utf-8"))
     expected_sid = (data.get("session_id") or "").strip()
-    if guard.get("result") != "passed" or guard.get("tests_visible") is not False:
-        raise RuntimeError("正式轨迹守卫结果无效，拒绝推送")
-    if expected_sid and guard.get("session_id") != expected_sid:
+    if not expected_sid:
+        raise RuntimeError("collection.json.session_id 为空，拒绝 finalize")
+    guard_ok = guard.get("result") == "passed" and guard.get("classification", "clean") == "clean"
+    if guard.get("classification") == "suspect":
+        review_path = ev / "trajectory_review.json"
+        if review_path.exists():
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+            guard_ok = (
+                review.get("decision") == "approved"
+                and review.get("session_id") == guard.get("session_id")
+                and len((review.get("reason") or "").strip()) >= 20
+            )
+    if not guard_ok or guard.get("tests_visible") is not False:
+        raise RuntimeError("正式轨迹未获 clean 结论，或 suspect 未有效人工复核，拒绝 finalize")
+    if guard.get("session_id") != expected_sid:
         raise RuntimeError("正式轨迹守卫 session_id 与 collection.json 不一致")
+    acceptance_checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), dict) else {}
+    required_acceptance = {"trajectory_analysis", "regression", "task_semantics", "private_verify"}
+    if (
+        acceptance.get("result") != "passed"
+        or acceptance.get("session_id") != expected_sid
+        or not required_acceptance.issubset(acceptance_checks)
+        or any(acceptance_checks[name].get("passed") is not True for name in required_acceptance)
+    ):
+        raise RuntimeError("自动轨迹验收未通过、session 不一致，或缺私测/回归证据，拒绝 finalize")
     if regression.get("result") != "passed":
         raise RuntimeError("绿灯后全量回归未通过，拒绝推送")
 
@@ -519,36 +606,88 @@ def cmd_push_fix(args):
     identity_env = git_identity_env(auth_env, author["name"], author["email"])
 
     record = proj_name.rsplit("__", 1)[-1] if "__" in proj_name else "001"
-    bug_branch = f"bug-{record}"
-    if run_git(repo, "rev-parse", "--verify", bug_branch, check=False).returncode != 0:
-        raise RuntimeError(f"分支 {bug_branch} 不存在（请先运行 github_project.py publish）")
+    green_branch, red_branch = delivery_branches(record)
+    if run_git(repo, "rev-parse", "--verify", green_branch, check=False).returncode != 0:
+        raise RuntimeError(f"分支 {green_branch} 不存在（请先运行 github_project.py publish）")
+    if _branch_exists(repo, red_branch):
+        raise RuntimeError(f"红测分支 {red_branch} 已存在，拒绝覆盖")
 
-    run_git(repo, "checkout", bug_branch)
-    sync_worktree(env_dir, repo)
+    run_git(repo, "checkout", green_branch)
+    if run_git(repo, "rev-list", "--count", green_branch).stdout.strip() != "1":
+        raise RuntimeError(f"{green_branch} 在 finalize 前必须只有 G1 一个提交")
+    g1_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    _assert_no_tests(repo, g1_sha)
+    sync_bug_source(env_dir, repo)
     ensure_delivery_files(repo, proj_name, proj / "BUG_REPRO.md", getattr(args, "module_path", None))
     _assert_root_delivery_files(repo)
-    run_git(repo, "add", "-A", "--", ".")
-    if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
-        raise RuntimeError(f"env 与 {bug_branch} 无差异：bugfix 题测试模型应有修复改动，请确认轨迹质检结论")
-    run_git(repo, "commit", "-m", f"fix: {bug_id}", env=identity_env)
-    fix_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
-
+    business_changes = [
+        name for name in run_git(repo, "diff", "--name-only", g1_sha, "--", ".").stdout.splitlines()
+        if not name.endswith("_test.go") and name not in DELIVERY_ROOT_FILES and not name.lower().endswith((".md", ".txt"))
+    ]
+    if not business_changes:
+        raise RuntimeError("G2 没有模型产生的功能代码改动，拒绝 finalize")
     copied_tests = copy_evaluator_to_repo(evaluator, repo)
     run_git(repo, "add", "-A", "--", ".")
     if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
-        raise RuntimeError("私有目标测试未产生独立改动，拒绝推送")
-    run_git(repo, "commit", "-m", f"test: {bug_id}", env=identity_env)
-    test_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
-    run_git(repo, "push", DEFAULT_REMOTE, bug_branch, env=identity_env)
-    run_git(repo, "checkout", "main")
+        raise RuntimeError(f"env 与 {green_branch} 无差异，bugfix 题应有模型修复和目标测试")
+    run_git(repo, "commit", "-m", f"fix+test: {bug_id}", env=identity_env)
+    g2_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    run_git(repo, "checkout", "--orphan", red_branch)
+    clear_worktree(repo)
+    run_git(repo, "checkout", g1_sha, "--", ".")
+    copy_evaluator_to_repo(evaluator, repo)
+    run_git(repo, "add", "-A", "--", ".")
+    run_git(repo, "commit", "-m", f"red-test: {bug_id}", env=identity_env)
+    r1_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    if run_git(repo, "rev-list", "--count", red_branch).stdout.strip() != "1":
+        raise RuntimeError("R1 red 分支必须为 orphan 单提交")
+    if run_git(repo, "merge-base", green_branch, red_branch, check=False).returncode == 0:
+        raise RuntimeError("green/red 分支存在共同祖先，拒绝交付")
+    g1_business = _tree_entries(repo, g1_sha, tests=False)
+    r1_business = _tree_entries(repo, r1_sha, tests=False)
+    if g1_business != r1_business:
+        raise RuntimeError("R1 与 G1 的非测试文件不完全一致")
+    if _tree_entries(repo, g2_sha, tests=True) != _tree_entries(repo, r1_sha, tests=True):
+        raise RuntimeError("G2 与 R1 的验收测试不完全一致")
+    for rel in copied_tests:
+        g2_blob = run_git(repo, "rev-parse", f"{g2_sha}:{rel}").stdout.strip()
+        r1_blob = run_git(repo, "rev-parse", f"{r1_sha}:{rel}").stdout.strip()
+        if g2_blob != r1_blob:
+            raise RuntimeError(f"G2/R1 验收文件不一致: {rel}")
+
+    run_git(repo, "push", DEFAULT_REMOTE, green_branch, red_branch, env=identity_env)
+    run_git(repo, "checkout", green_branch)
+    repo_url = f"{html}/tree/{green_branch}"
+    _write_delivery_metadata(proj, {
+        "schema": 1,
+        "state": "finalized",
+        "repo_url": repo_url,
+        "green_branch": green_branch,
+        "red_branch": red_branch,
+        "g1_commit": g1_sha,
+        "g2_commit": g2_sha,
+        "r1_commit": r1_sha,
+        "session_id": data.get("session_id") or "",
+        "test_files": copied_tests,
+        "finalized_at": datetime.now(timezone.utc).isoformat(),
+    })
     print(json.dumps({
         "ok": True,
-        "repoUrl": f"{html}/tree/{bug_branch}",
-        "fixCommit": f"{html}/commit/{fix_sha}",
-        "testCommit": f"{html}/commit/{test_sha}",
+        "repoUrl": repo_url,
+        "g1Commit": f"{html}/commit/{g1_sha}",
+        "g2Commit": f"{html}/commit/{g2_sha}",
+        "r1Commit": f"{html}/commit/{r1_sha}",
         "testFiles": copied_tests,
-        "bugBranch": bug_branch,
+        "greenBranch": green_branch,
+        "redBranch": red_branch,
     }, ensure_ascii=False))
+
+
+def cmd_push_fix(args):
+    print("⚠️  push-fix 已弃用，按 finalize 的 G1/G2/R1 流程执行", file=sys.stderr)
+    cmd_finalize(args)
 
 
 def main():
@@ -571,7 +710,16 @@ def main():
     c.add_argument("--module-path", help="Go module 相对仓库根目录的子目录（如 backend），缺省自动探测")
     c.set_defaults(func=cmd_publish)
 
-    c = sub.add_parser("push-fix")
+    c = sub.add_parser("finalize")
+    c.add_argument("--root", default=".")
+    c.add_argument("--repo-name", required=True)
+    c.add_argument("--project", required=True)
+    c.add_argument("--date")
+    c.add_argument("--bug-id")
+    c.add_argument("--module-path", help="Go module 相对仓库根目录的子目录（如 backend），缺省自动探测")
+    c.set_defaults(func=cmd_finalize)
+
+    c = sub.add_parser("push-fix", help="兼容旧命令；实际执行 finalize")
     c.add_argument("--root", default=".")
     c.add_argument("--repo-name", required=True)
     c.add_argument("--project", required=True)

@@ -241,6 +241,11 @@ def cmd_upload(args):
             upload_project(proj, cookie, args.dry_run)
         except Exception as e:
             print(f"❌ {proj.name}: {e}")
+    if args.sync and not args.dry_run:
+        subprocess.run([
+            sys.executable, str(Path(__file__).with_name("collection_table.py")),
+            "sync", "--root", str(root),
+        ], check=True)
 
 
 def cmd_upload_all(args):
@@ -273,6 +278,7 @@ def main():
     c.add_argument("--cookie")
     c.add_argument("--date")
     c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--sync", action="store_true")
     c.set_defaults(func=cmd_upload)
 
     c = sub.add_parser("upload-all")

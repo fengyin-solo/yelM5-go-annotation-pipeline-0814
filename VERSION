@@ -51,3 +51,4 @@
 2026-08-20 交付字段真实故障叙事：bug_id/user_query/gold_root_cause/success_criteria/prompt 禁止出现埋错、人工注入、出题环境、_gold 等内部构造痕迹；success_criteria 统一改写为问题存在时/修复后
 2026-08-20 禁止领域前置门禁：新增完整 forbidden-domains 清单与 domain_guard.py；项目、功能点、题面三层语义审查前移到编码/建仓/埋错前，ensure/填表/题面自检/post_qc 自动复查，命中后必须换题不得只改文案
 2026-08-22 修复轨迹目标测试彻底隔离：新增私有 evaluator/、无 *_test.go 系统临时工作区、越界/测试工具调用守卫；正式轨迹不执行 verify_cmds 且不注入额外提示词；红绿证据与 post_qc 仅在临时副本注入 evaluator；GitHub 严格分为 fix commit 后 test commit
+2026-08-23 防答案泄漏拓扑改造：不再发布 main/干净基座；每条使用 orphan bugNNN_green G1→G2 与 orphan bugNNN_red R1；G1 零测试且生成 SHA-256 快照清单；finalize 在轨迹与绿灯后创建 G2/R1；轨迹审计改为 cheat/suspect/clean；post_qc 新增远程分支、共同祖先、文件树、快照与时序硬校验

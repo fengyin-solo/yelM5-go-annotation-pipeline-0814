@@ -1,6 +1,6 @@
 # yelM5-红绿轨迹-最新-go-annotation-pipeline-0814
 
-生产「Go 语言 × Bugfix / 问题排查」模型训练数据的完整流水线。选题统一来自自己 0-1 生成的 Go 项目，埋 bug 后修复，只交付 GitHub `repo_url` 分支地址；一个 repo 最多 30 条数据，超过 30 条时拆到多个不同的 0-1 项目和 GitHub 仓库，同一个 bug 只能出 bugfix 或 diagnosis 二选一。
+生产「Go 语言 × Bugfix / 问题排查」模型训练数据的完整流水线。选题统一来自自己 0-1 生成的 Go 项目；每个 bug 用互不相连的 orphan green/red 分支交付，模型只拿到 G1 单分支、单提交、无测试快照。一个 repo 最多 30 条数据，同一个 bug 只能出 bugfix 或 diagnosis 二选一。
 
 > 这是分享给标注/出题同事使用的版本。首次使用前必须先做一次配置，见下文。
 
@@ -76,6 +76,8 @@ python3 <skill>/scripts/configure.py check
   "version": 1
 }
 ```
+
+> `defaultBranch` 是共享凭据文件的兼容字段；本流水线不向交付仓库推送 `main` 或干净基座。
 
 > 样例中除 `token` 用 `ghp_XXX...` 脱敏外，其余字段为真实值；使用时把 `token` 换成你新生成的 Personal Access Token（勾选 `repo` 权限）。
 
