@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from serial_lock import test_model_lock  # noqa: E402
 from contract_coverage import validate_manifest  # noqa: E402
 from trajectory_acceptance import run_acceptance  # noqa: E402
+from user_query_rules import user_query_go_version_issues  # noqa: E402
 from trajectory_guard import (  # noqa: E402
     copy_without_tests,
     private_test_issues,
@@ -378,6 +379,7 @@ def skill_leak_issues(env: Path, prompt_text: str) -> list[str]:
     ]:
         if marker in low:
             issues.append(f"prompt 中包含技能/答案标记: {marker}")
+    issues.extend(user_query_go_version_issues(prompt_text))
     return issues
 
 
@@ -500,6 +502,7 @@ def cmd_run(args):
       settings = temp_root / "claude-settings.json"
       hook_command = " ".join(shlex.quote(value) for value in (
           sys.executable, str(hook_script), "--workspace", str(work_env),
+          *(("--read-only",) if task_type == "diagnosis" else ()),
       ))
       settings.write_text(json.dumps({
           "hooks": {"PreToolUse": [{

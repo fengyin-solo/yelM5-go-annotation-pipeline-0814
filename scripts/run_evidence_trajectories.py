@@ -419,7 +419,8 @@ def _upload_evidence(path: Path, key: str, sid: str, cookie: str) -> str:
         sys.exit(1)
 
 
-def _finalize_verify_result(obj: dict, ev: Path, coll: dict, coll_path: Path, root: Path, task_type: str) -> None:
+def _finalize_verify_result(obj: dict, ev: Path, coll: dict, coll_path: Path, root: Path,
+                            task_type: str, *, sync: bool = True) -> None:
     issues = _validate_verify_result(obj, ev, task_type)
     if issues:
         print("❌ verify_result 校验失败：")
@@ -436,7 +437,7 @@ def _finalize_verify_result(obj: dict, ev: Path, coll: dict, coll_path: Path, ro
     (ev / "verify_result.json").write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"✅ verify_result 已回填: {compact}")
     collection_table = Path(__file__).with_name("collection_table.py")
-    if collection_table.exists() and coll_path.exists():
+    if sync and collection_table.exists() and coll_path.exists():
         subprocess.run([sys.executable, str(collection_table), "sync", "--root", str(root)])
     print(f"✅ verify_result.json 已写入: {ev / 'verify_result.json'}")
 
@@ -654,6 +655,48 @@ def cmd_validate(args):
     print(f"✅ verify_result 校验通过（task_type={task_type}）：JSON 结构、result 值、URL 可访问、session_id 匹配均正常。")
 
 
+def cmd_upload(args):
+    """Upload already-generated local evidence without invoking the target model again."""
+    root = Path(args.root).resolve()
+    proj = find_project(root, args.project, args.date)
+    if not proj:
+        print(f"❌ 未找到项目: {args.project}")
+        sys.exit(1)
+    coll_path = proj / "collection.json"
+    coll = _load_json(coll_path)
+    task_type = (coll.get("task_type") or "bugfix").strip()
+    ev = proj / "_evidence"
+    red_state = ev / "red_result.json"
+    red_out = ev / "verify_red.jsonl"
+    if not red_state.exists() or not red_out.exists():
+        print("❌ 缺少本地红灯产物，不能上传。")
+        sys.exit(1)
+    cookie = get_cookie(args)
+    if not cookie:
+        print("❌ 缺少 COS cookie。")
+        sys.exit(1)
+    red_info = _load_json(red_state)
+    red_sid = (red_info.get("session_id") or "").strip()
+    red_url = (red_info.get("trajectory_url") or "").strip()
+    if not red_url:
+        red_url = _upload_evidence(red_out, "verify_red", red_sid, cookie)
+        red_info["trajectory_url"] = red_url
+        red_state.write_text(json.dumps(red_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    green_sid = green_url = ""
+    if task_type == "bugfix":
+        green_out = ev / "verify_green.jsonl"
+        if not green_out.exists():
+            print("❌ bugfix 缺少本地绿灯产物，不能上传。")
+            sys.exit(1)
+        green_sid = _extract_session_from_file(green_out)
+        current = _load_json(ev / "verify_result.json") if (ev / "verify_result.json").exists() else {}
+        green_url = ((current.get("post_fix") or {}).get("trajectory_url") or "").strip()
+        if not green_url:
+            green_url = _upload_evidence(green_out, "verify_green", green_sid, cookie)
+    obj = _build_verify_result(red_sid, green_sid, red_url, green_url, task_type)
+    _finalize_verify_result(obj, ev, coll, coll_path, root, task_type, sync=False)
+
+
 def main():
     ap = argparse.ArgumentParser(description="生成并上传红/绿两条证据轨迹，回填 verify_result")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -677,6 +720,13 @@ def main():
     c.add_argument("--project", required=True)
     c.add_argument("--date")
     c.set_defaults(func=cmd_validate)
+
+    c = sub.add_parser("upload", help="只上传已生成的本地红/绿证据，不重跑测试模型")
+    c.add_argument("--root", default=".")
+    c.add_argument("--project", required=True)
+    c.add_argument("--date")
+    c.add_argument("--cookie")
+    c.set_defaults(func=cmd_upload)
 
     args = ap.parse_args()
     args.func(args)

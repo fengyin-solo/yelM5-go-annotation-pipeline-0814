@@ -5,6 +5,7 @@
 只读，不改任何产物；逐条输出 ✅/❌，最后给出汇总，不合格时退出码非 0。
 
 校验项（对应甲方抽检红线）：
+  0. preflight   新批次必须有 20/20 红绿、目标断言和回退实跑证据
   1. privacy     目标测试只存在私有 evaluator，env 和初始 Bug 基线不得包含
   2. build       env 与 _gold 都能 `go build ./...`（项目能编译）
   3. scope       bugfix 的 gold 修复至少改 4 个功能文件且增删总行数至少 20 行
@@ -395,6 +396,30 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     env = go_env(go_ver)
     results: list[tuple[str, bool, str]] = []
 
+    status = json.loads((proj / "status.json").read_text(encoding="utf-8")) if (proj / "status.json").exists() else {}
+    pipeline = status.get("pipeline") if isinstance(status.get("pipeline"), dict) else {}
+    if pipeline:
+        preflight_path = proj / "_evidence" / "preflight.json"
+        preflight_ok = False
+        preflight_msg = "缺 _evidence/preflight.json"
+        try:
+            preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+            pre_checks = preflight.get("checks") if isinstance(preflight.get("checks"), dict) else {}
+            red_cal = pre_checks.get("red_calibration") or {}
+            green_cal = pre_checks.get("green_calibration") or {}
+            ablation = pre_checks.get("repair_ablation") or {}
+            preflight_ok = (
+                preflight.get("result") == "passed"
+                and red_cal.get("passed") is True and red_cal.get("completed", 0) >= 20
+                and green_cal.get("passed") is True and green_cal.get("completed", 0) >= 20
+                and (pre_checks.get("target_assertion_reached") or {}).get("passed") is True
+                and (task_type != "bugfix" or ablation.get("passed") is True)
+            )
+            preflight_msg = "20/20 红绿、目标断言和回退证据通过" if preflight_ok else "批次预检证据不完整"
+        except Exception as exc:
+            preflight_msg = f"批次预检证据无效: {exc}"
+        results.append(("preflight", preflight_ok, preflight_msg))
+
     env_dir = proj / "env"
     gold_dir = proj.parents[1] / "_gold" / proj.name
     if not gold_dir.exists():
@@ -543,6 +568,8 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
             required = {"trajectory_analysis", "regression", "task_semantics"}
             if task_type == "bugfix":
                 required.add("private_verify")
+            elif pipeline:
+                required.add("diagnosis_root_cause")
             acceptance_ok = (
                 acceptance.get("result") == "passed"
                 and acceptance.get("session_id") == sid

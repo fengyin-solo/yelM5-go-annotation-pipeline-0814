@@ -21,6 +21,8 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
+from user_query_rules import user_query_go_version_issues
+
 try:
     from openpyxl import Workbook, load_workbook
     from openpyxl.styles import Alignment, Font
@@ -220,6 +222,17 @@ def cmd_write(args):
         for source, patterns in acceptance_issues:
             for pattern in patterns:
                 print(f"   [{source}] [matched] {pattern}")
+        sys.exit(1)
+    version_issues = [
+        (source, issues)
+        for source, text in query_sources
+        if (issues := user_query_go_version_issues(text))
+    ]
+    if version_issues:
+        print("❌ user_query 环境描述硬门禁：不得写 Go 版本号或 Go 工具链版本；请用‘当前项目’表达。")
+        for source, issues in version_issues:
+            for issue in issues:
+                print(f"   [{source}] {issue}")
         sys.exit(1)
     harness = str(clean.get("harness") or "").strip()
     if harness and not re.search(r"\bv?\d+(?:\.\d+)+\b", harness):

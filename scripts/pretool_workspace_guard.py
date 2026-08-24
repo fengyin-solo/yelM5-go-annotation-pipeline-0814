@@ -82,14 +82,21 @@ def bash_path_candidates(command: str) -> list[str]:
     return candidates
 
 
-def inspect_hook(payload: dict, workspace: Path) -> list[str]:
+def inspect_hook(payload: dict, workspace: Path, *, read_only: bool = False) -> list[str]:
     tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     cwd = canonical(Path(str(payload.get("cwd") or workspace)))
     issues: list[str] = []
     values: list[str] = []
+    if read_only and tool in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
+        issues.append(f"diagnosis workspace is read-only: {tool} is forbidden")
     if tool == "Bash":
         command = str(tool_input.get("command") or "")
+        if read_only and (
+            re.search(r"(?:^|[;&|]\s*)\b(?:rm|mv|cp|mkdir|touch|install|truncate|tee|sed\s+-i|perl\s+-i|go\s+fmt|gofmt)\b", command)
+            or re.search(r"(?:^|[^<])>{1,2}\s*[^&]", command)
+        ):
+            issues.append("diagnosis workspace is read-only: mutating Bash command is forbidden")
         values.extend(bash_path_candidates(command))
         if re.search(r"\$(?:\{)?(?:HOME|TMPDIR|OLDPWD)(?:\})?", command):
             issues.append("external-directory environment variable is forbidden")
@@ -113,13 +120,14 @@ def inspect_hook(payload: dict, workspace: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", required=True)
+    parser.add_argument("--read-only", action="store_true")
     args = parser.parse_args()
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
         print(f"{MARKER} invalid hook input: {exc}", file=sys.stderr)
         return 2
-    issues = inspect_hook(payload, Path(args.workspace))
+    issues = inspect_hook(payload, Path(args.workspace), read_only=args.read_only)
     if not issues:
         return 0
     print(f"{MARKER} " + "; ".join(issues), file=sys.stderr)

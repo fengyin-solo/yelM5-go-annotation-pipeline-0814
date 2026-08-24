@@ -229,6 +229,13 @@ def cmd_register(args):
     source, key, disp = identify(args.repo, args.source, args.github_url, args.local_path)
     r = find(data, key, source)
     uses = r.get("uses", 0) if r else 0
+    if r and args.project:
+        registered_projects = set(r.get("projects") or [])
+        if r.get("project"):
+            registered_projects.add(r["project"])
+        if args.project in registered_projects:
+            print(f"✅ 已登记 {key} / {args.project}，幂等跳过（仍为 {uses}/{MAX_RECORDS_PER_REPO} 条）")
+            return
     if uses >= MAX_RECORDS_PER_REPO:
         print(f"❌ 拒绝登记：{key} 已用满 {MAX_RECORDS_PER_REPO} 条，请新建独立 0-1 项目和 GitHub 仓库。")
         sys.exit(1)
@@ -244,6 +251,9 @@ def cmd_register(args):
         r["used_at"] = args.date or _date.today().isoformat()
         if args.project:
             r["project"] = args.project
+            projects = set(r.get("projects") or [])
+            projects.add(args.project)
+            r["projects"] = sorted(projects)
         if args.note:
             r["note"] = args.note
         if github_url:
@@ -260,6 +270,7 @@ def cmd_register(args):
             "local_path": local_path,
             "used_at": args.date or _date.today().isoformat(),
             "project": args.project or "",
+            "projects": [args.project] if args.project else [],
             "note": args.note or "",
         }
         data.setdefault("repositories", []).append(entry)

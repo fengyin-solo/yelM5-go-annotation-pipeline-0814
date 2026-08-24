@@ -37,6 +37,31 @@ class TrajectoryAcceptanceTest(unittest.TestCase):
             saved = json.loads((project / "_evidence" / "trajectory_acceptance.json").read_text())
             self.assertIn("zero calls", saved["checks"]["private_verify"]["output"])
 
+    def test_diagnosis_requires_root_cause_locations_symbols_and_mechanism(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "collection.json").write_text(json.dumps({
+                "gold_root_cause": "文件: internal/a.go, internal/b.go, internal/c.go。符号: StartWorker StopWorker SaveState。机制: context 取消未传递，重试 goroutine 继续写入状态。"
+            }), encoding="utf-8")
+            (project / "difficulty_review.json").write_text(json.dumps({
+                "core_defect_review": {"root_cause_locations": [
+                    {"file": "internal/a.go"}, {"file": "internal/b.go"}, {"file": "internal/c.go"}
+                ]}
+            }), encoding="utf-8")
+            transcript = root / "sid.jsonl"
+            answer = "internal/a.go 的 StartWorker 和 internal/b.go 的 StopWorker 没有传递 context 取消，internal/c.go 的 SaveState 因此被重试 goroutine 继续写入状态。"
+            transcript.write_text(json.dumps({
+                "type": "assistant", "message": {"content": [{"type": "text", "text": answer}]}
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            result = trajectory_acceptance._diagnosis_root_cause_check(project, transcript)
+            self.assertTrue(result["passed"], result["output"])
+            transcript.write_text(json.dumps({
+                "type": "assistant", "message": {"content": [{"type": "text", "text": "应该是取消有问题。"}]}
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            self.assertFalse(trajectory_acceptance._diagnosis_root_cause_check(project, transcript)["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,6 +116,13 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 | `done` | 数据完成，仓库已登记进全局已用清单 |
 | `rejected` | 不符合要求，已标记删除（移入 `_rejected/`） |
 
+批次阶段（`status.json.pipeline.stage`）依次为：
+
+```text
+prepared -> preflight_passed -> g1_published -> red_passed -> main_running
+-> main_accepted -> green_passed -> finalized -> uploaded -> done
+```
+
 ## 常用脚本（均在本期根目录下执行）
 
 | 脚本 | 作用 |
@@ -136,7 +143,27 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 | `python3 <skill>/scripts/build_docker.py` | Docker 本机验证（不打包、不截图） |
 | `python3 <skill>/scripts/configure.py` | 首次配置向导：`check` 自检 / `setup` 写配置 / `show` 查看 / `reset-registry` 清空已用清单 |
 | `python3 <skill>/scripts/domain_guard.py` | 禁止项目/功能点最低门禁：建仓和埋错前检查项目描述、仓库名、README 与候选功能点；通过后仍须人工语义审查 |
-| `python3 <skill>/scripts/post_qc.py` | **后置质检**（交付前硬校验）：`--root .` 对整期所有记录做隐私门禁/build/scope/red/green/文件/字段/证据/轨迹守卫/诊断零改动/验证命令覆盖/难度审查/禁止领域 13 项检查 |
+| `python3 <skill>/scripts/post_qc.py` | **后置质检**（交付前硬校验）：`--root .` 对整期所有记录做预检留证/隐私门禁/build/scope/red/green/文件/字段/证据/轨迹守卫/诊断零改动/验证命令覆盖/难度审查/禁止领域/仓库拓扑检查 |
+| `python3 <skill>/scripts/batch_pipeline.py` | 推荐批次入口：`preflight` / `run` / `resume` / `status`，负责一次性预检、状态恢复、自动流转、本地并发和批末集中同步 |
+| `python3 <skill>/scripts/batch_preflight.py` | 单独批次预检：工具链 canary、输入指纹、20/20 红绿校准、目标断言到达和 bugfix 四文件回退实跑留证 |
+
+## 批次编排（多条记录默认使用）
+
+所有记录的题面、env、gold、evaluator、难度审查和收集字段准备完成后，从本期根目录运行：
+
+```bash
+python3 <skill>/scripts/batch_pipeline.py preflight --root . --workers 3
+python3 <skill>/scripts/batch_pipeline.py run --root . --workers 3
+python3 <skill>/scripts/batch_pipeline.py resume --root .
+python3 <skill>/scripts/batch_pipeline.py status --root .
+```
+
+- `status.json.pipeline` 是批次阶段、输入指纹和 `attempt_history` 的唯一事实源；原有 `state` 继续管理 workspace 生命周期。
+- 预检按批次中每个 `go.mod` 版本分别验证工具链切换、`-race`、测试二进制和 `LC_UUID` 能力，并发执行本地 Go 检查（默认 3 条），Docker 单独限流（默认 1 条）。`LC_UUID` 只在 evaluator 明确依赖它时硬失败；无此依赖时仍记录能力结果，由真实红灯断言到达门禁阻断工具链假红。只有输入指纹未变时才复用结果。
+- 红灯、正式轨迹、绿灯仍共用全局测试模型锁，不并发；正式轨迹只在语义验收失败时归档后重跑，最多 3 次。
+- diagnosis 在 PreToolUse 就禁止 Edit/Write 和明确 Bash 写操作，跑后仍做零 diff 与「文件/符号/机制」根因语义验收。
+- 证据轨迹先本地生成，全部质量门禁通过后再并发上传；Excel 和注册表各只在批末重建一次。
+- `--skip-upload` 会留下完整本地产物；后续 `resume` 只补上传和同步，不重跑测试模型。
 
 ## 第 1 步：选题准备（0-1 项目 + 去重）
 
@@ -288,7 +315,7 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
 2. **关联症状**：至少 2 个真实可见且属于同一故障链的现象，例如请求已返回但后台仍重试，随后请求又继承旧错误；报错只贴 1 行最关键的。
 3. **正确预期**：说清取消后应停止、后续请求应隔离、失败不应留下副作用等公开行为，不写修复方案。
 4. **一句自然的背景或情绪**（每条现编，不得复用任何见过的句子）。
-5. **环境交代**（目录位置 / Go 版本 / 能直接跑）可以揉进其他句子，不必单独成句。
+5. **环境交代**只需自然写“当前项目就可以了”；禁止写 Go 版本号或 Go 工具链版本。是修复还是只定位，另用任务指令说清。
 6. **任务指令**（红线，见上）：bugfix 说清「帮我修好」，diagnosis 说清「先别改代码、帮我定位原因」。
 7. **纯提示词红线**：**不写任何验收/复现/运行指令，不贴命令代码块，也不要要求对方运行、执行、重跑或验证测试**；`verify_cmds`、复现命令只进 collection.json 与红/绿证据阶段，绝不进题面。只描述真实现象、触发过程、公开预期和修复/定位诉求。
 
@@ -296,6 +323,7 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
 
 ### 简洁红线
 
+- **不写 Go 版本环境**：`user_query` / `prompt.txt` 中禁止出现“Go 1.23”“Go 版本为 1.23”“1.23 版 Go”等描述；不论是否带空格、`v` 前缀或补丁版本都不得写。环境交代正常写“当前项目就可以了”，Go 版本继续只在 `go_version` 字段和内部验证中维护。
 - **不写任何命令**：`go test` / `go build` / `go run` 等验收、复现、运行命令一律不出现；纯提示词即可，命令交给模型自己去想或由 `verify_cmds` 独立维护。
 - 默认**不贴源码**；确有必要展示关键症状的最小复现 ≤3 行（症状代码，不是命令），能一句话说清就不用代码。
 - 报错只贴关键一行，禁止整段堆栈、整段日志。
@@ -345,7 +373,7 @@ python3 <skill>/scripts/contract_coverage.py check --project <project>
 python3 <skill>/scripts/check_prompt_duplicates.py --root .
 ```
 
-脚本会递归扫描各 `YYYY-MM-DD/<record>/prompt.txt` 与 `collection.json` 里的 `user_query` / `success_criteria` / `verify_cmds` 三条文案，报告禁止业务类型、被禁模板句和任意两题同一字段 >= 12 字的连续重复片段。禁止业务类型有红时必须回到功能点阶段换题，不能只改文案；其余文案红线改到全绿后再进入第 5 步。
+脚本会递归扫描各 `YYYY-MM-DD/<record>/prompt.txt` 与 `collection.json` 里的 `user_query` / `success_criteria` / `verify_cmds` 三条文案，报告禁止业务类型、`user_query` 中的 Go 版本环境描述、被禁模板句和任意两题同一字段 >= 12 字的连续重复片段。禁止业务类型有红时必须回到功能点阶段换题，不能只改文案；其余文案红线改到全绿后再进入第 5 步。
 
 ## 第 5 步：红绿校准（出题自检）
 

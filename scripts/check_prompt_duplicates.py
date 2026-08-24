@@ -8,7 +8,8 @@
    完全相同的连续片段即硬红（verify_cmds 只比较精确测试标识，忽略必需命令骨架）。
 3. 检查 user_query / success_criteria 是否泄露内部缺陷构造过程。
 4. 检查 user_query / success_criteria 是否命中禁止项目或功能点。
-5. 只读，不修改任何文件。
+5. 检查 user_query 是否写入 Go 版本号或工具链版本。
+6. 只读，不修改任何文件。
 """
 import argparse
 import json
@@ -17,6 +18,8 @@ import re
 import shlex
 import sys
 from collections import defaultdict
+
+from user_query_rules import user_query_go_version_issues
 
 BANNED_PHRASES = [
     "之前是好的，估计是最近哪次改动搞出来的",
@@ -223,6 +226,24 @@ def check_forbidden_domains(records):
     return bad
 
 
+def check_user_query_go_versions(records):
+    """检查 user_query 中的 Go 版本/工具链环境描述。"""
+    bad = []
+    for record in records:
+        for item in record["texts"]:
+            if item["field"] != "user_query":
+                continue
+            for issue in user_query_go_version_issues(item["text"]):
+                bad.append({
+                    "id": record["id"],
+                    "field": item["field"],
+                    "issue": issue,
+                    "source": item["source"],
+                    "path": item["path"],
+                })
+    return bad
+
+
 def find_duplicates(records, min_dup):
     """对四个字段分别做两两最长公共块比对。"""
     from difflib import SequenceMatcher
@@ -279,9 +300,10 @@ def main():
     forbidden = check_forbidden_chars(records)
     internal = check_internal_construction(records)
     domains = check_forbidden_domains(records)
+    go_versions = check_user_query_go_versions(records)
 
-    if not banned and not dups and not forbidden and not internal and not domains:
-        print("去重自检通过：三条文案均未发现被禁模板句、内部构造措辞、禁止业务类型、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
+    if not banned and not dups and not forbidden and not internal and not domains and not go_versions:
+        print("去重自检通过：三条文案均未发现被禁模板句、内部构造措辞、禁止业务类型、Go 版本环境描述、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
         return 0
 
     if banned:
@@ -303,6 +325,11 @@ def main():
         print("\n[硬红] 题面或验收描述命中禁止业务类型，必须更换功能点，禁止只改写措辞：")
         for item in domains:
             print("  - {id}/{field} ({source}): {category} 命中 {match!r}\n    {path}".format(**item))
+
+    if go_versions:
+        print("\n[硬红] user_query 不得写 Go 版本号或工具链版本，请改用‘当前项目’的自然表达：")
+        for item in go_versions:
+            print("  - {id}/{field} ({source}): {issue}\n    {path}".format(**item))
 
     if dups:
         print("\n[硬红] 任意两题的同一字段存在 >= {} 字连续重复片段:".format(args.min_dup))

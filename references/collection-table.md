@@ -20,7 +20,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 | repo_url | **`bug<record>_green` 分支地址**（GitHub `https://github.com/<owner>/<repo>/tree/bug001_green`）；bugfix 最终 green 为 G1→G2，同 record 的 red 为 orphan R1；diagnosis 只保留 green G1 |
 | go_version | 三段式，ASCII 分号 `;` 分隔：基础镜像 tag + go.mod 指令 + GOTOOLCHAIN |
 | repro_determinism | 只填 `deterministic` / `flaky`；flaky 不做 bugfix |
-| user_query | 纯文本、简短口语化、高中生语言的**纯提示词**：现象 + 人味化废话 + 环境交代 + 任务指令；**不写任何验收/复现/运行命令、不贴命令代码块**（`verify_cmds` 独立维护）；确需展示症状代码时最小复现 ≤3 行；bugfix 明确写「帮我修好」，diagnosis 明确写「先别改代码」；不出现根因/原因，不用「不是...而是...」等 AI 词 |
+| user_query | 纯文本、简短口语化、高中生语言的**纯提示词**：现象 + 人味化废话 + 环境交代 + 任务指令；环境正常写“当前项目就可以了”，**禁止写 Go 版本号或 Go 工具链版本**；**不写任何验收/复现/运行命令、不贴命令代码块**（`verify_cmds` 独立维护）；确需展示症状代码时最小复现 ≤3 行；bugfix 明确写“帮我修好”，diagnosis 明确写“先别改代码”；不出现根因/原因，不用“不是...而是...”等 AI 词 |
 | trajectory | 腾讯 COS 上传链接；本地 `<session_id>.jsonl` 作为附件一并交付（必须是 Claude Code 自己落盘的原始 session 轨迹文件，不是 stdout 捕获拼装的文件） |
 | verify_cmds | **bugfix / diagnosis 都必填**：只写一条目标 Bug 定向复现命令，明确唯一目标包、精确测试名和 `-count=1`。对应测试只存在私有 `evaluator/`，正式修复轨迹不执行该命令；红/绿证据轨迹在临时注入 evaluator 后各自只执行一次，实际 Bash 调用、最终回复【命令】与填表值逐字符一致 |
 | gold_root_cause | **diagnosis 必填**：紧凑三项式 `文件: ... 符号: ... 机制: ...`，每项附可复核位置；bugfix 也建议填（供排查阶段 QC）。只描述程序现有故障，不写缺陷构造过程、内部环境或 `_gold` |
