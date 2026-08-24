@@ -160,6 +160,16 @@ def run_docker(project: Path, root: Path, timeout: int) -> None:
                          "output_tail": output[-5000:]})
 
 
+def preflight_locked(project: Path, root: Path, **kwargs):
+    with record_lock(project, root):
+        return preflight_project(project, root, **kwargs)
+
+
+def docker_locked(project: Path, root: Path, timeout: int) -> None:
+    with record_lock(project, root):
+        run_docker(project, root, timeout)
+
+
 def do_preflight(projects: list[Path], root: Path, args) -> None:
     versions = {version for project in projects if (version := declared_version(project))}
     uuid_versions = {version for project in projects
@@ -167,7 +177,7 @@ def do_preflight(projects: list[Path], root: Path, args) -> None:
     toolchain_canary(root, versions=versions, require_lc_uuid=uuid_versions, force=args.force)
     failures = []
     with ThreadPoolExecutor(max_workers=max(1, args.workers), thread_name_prefix="batch-local") as pool:
-        futures = {pool.submit(preflight_project, p, root, calibration_runs=args.calibration_runs,
+        futures = {pool.submit(preflight_locked, p, root, calibration_runs=args.calibration_runs,
                                timeout=args.timeout, force=args.force): p for p in projects}
         for future in as_completed(futures):
             project = futures[future]
@@ -184,7 +194,7 @@ def do_preflight(projects: list[Path], root: Path, args) -> None:
     if not args.skip_docker:
         # Docker builds compete heavily for disk/cache; keep this pool separately bounded.
         with ThreadPoolExecutor(max_workers=max(1, args.docker_workers), thread_name_prefix="batch-docker") as pool:
-            futures = {pool.submit(run_docker, p, root, args.timeout): p for p in projects}
+            futures = {pool.submit(docker_locked, p, root, args.timeout): p for p in projects}
             for future in as_completed(futures):
                 project = futures[future]
                 future.result()
@@ -296,10 +306,14 @@ def model_phases(project: Path, root: Path, args) -> None:
     green(project, root, args)
 
 
+def record_lock(project: Path, root: Path):
+    path = root / "_locks" / "records" / lock_name(str(project.resolve()))
+    return resource_lock(path, label=f"记录 {project.name}")
+
+
 def record_pipeline(project: Path, root: Path, args) -> None:
     """Advance one record independently; shared Git writes lock inside github_project.py."""
-    lock = root / "_locks" / "records" / lock_name(str(project.resolve()))
-    with resource_lock(lock, label=f"记录 {project.name}"):
+    with record_lock(project, root):
         reconcile(project)
         publish(project, root, args)
         model_phases(project, root, args)
@@ -342,13 +356,14 @@ def run_model_phases(projects: list[Path], root: Path, args) -> None:
 
 
 def upload_one(project: Path, root: Path, args) -> None:
-    if stage_passed(project, "uploaded"):
-        return
-    run_checked(command("run_evidence_trajectories.py", "upload", "--root", str(root),
-                        "--project", project.name, "--date", project.parent.name), cwd=root, timeout=args.timeout)
-    run_checked(command("upload_trajectory.py", "upload", "--root", str(root),
-                        "--project", project.name, "--date", project.parent.name), cwd=root, timeout=args.timeout)
-    mark(project, "uploaded")
+    with record_lock(project, root):
+        if stage_passed(project, "uploaded"):
+            return
+        run_checked(command("run_evidence_trajectories.py", "upload", "--root", str(root),
+                            "--project", project.name, "--date", project.parent.name), cwd=root, timeout=args.timeout)
+        run_checked(command("upload_trajectory.py", "upload", "--root", str(root),
+                            "--project", project.name, "--date", project.parent.name), cwd=root, timeout=args.timeout)
+        mark(project, "uploaded")
 
 
 def finish(projects: list[Path], root: Path, args) -> None:
@@ -359,26 +374,35 @@ def finish(projects: list[Path], root: Path, args) -> None:
     # Expensive spreadsheet and registry mirrors are each rebuilt once per batch.
     run_checked(command("collection_table.py", "sync", "--root", str(root)), cwd=root, timeout=args.timeout)
     if args.projects:
-        for project in projects:
-            run_checked(command("post_qc.py", "--root", str(root), "--project", project.name,
-                                "--date", project.parent.name, "--workers", "1"),
-                        cwd=root, timeout=max(args.timeout, 7200))
+        with ThreadPoolExecutor(max_workers=max(1, min(args.workers, len(projects))),
+                                thread_name_prefix="batch-qc") as pool:
+            futures = [pool.submit(
+                run_checked,
+                command("post_qc.py", "--root", str(root), "--project", project.name,
+                        "--date", project.parent.name, "--workers", "1"),
+                cwd=root, timeout=max(args.timeout, 7200),
+            ) for project in projects]
+            for future in as_completed(futures):
+                future.result()
     else:
         qc_cmd = command("post_qc.py", "--root", str(root), "--workers", str(args.workers))
         if args.date:
             qc_cmd.extend(["--date", args.date])
         run_checked(qc_cmd, cwd=root, timeout=max(args.timeout, 7200))
     for project in projects:
-        data = collection(project)
-        status = load_json(project / "status.json")
-        repo_url = str(data.get("repo_url") or "")
-        run_checked(command("repo_registry.py", "register", repo_url or str(status.get("repo") or project.name),
-                            "--source", "auto", "--github-url", repo_url,
-                            "--project", project.name, "--date", project.parent.name,
-                            "--note", f"bug {data.get('bug_id', '')}"), cwd=root, timeout=args.timeout)
-        run_checked(command("workspace.py", "set", "--root", str(root), "--project", project.name,
-                            "--date", project.parent.name, "--state", "done"), cwd=root, timeout=args.timeout)
-        mark(project, "done")
+        with record_lock(project, root):
+            if stage_passed(project, "done"):
+                continue
+            data = collection(project)
+            status = load_json(project / "status.json")
+            repo_url = str(data.get("repo_url") or "")
+            run_checked(command("repo_registry.py", "register", repo_url or str(status.get("repo") or project.name),
+                                "--source", "auto", "--github-url", repo_url,
+                                "--project", project.name, "--date", project.parent.name,
+                                "--note", f"bug {data.get('bug_id', '')}"), cwd=root, timeout=args.timeout)
+            run_checked(command("workspace.py", "set", "--root", str(root), "--project", project.name,
+                                "--date", project.parent.name, "--state", "done"), cwd=root, timeout=args.timeout)
+            mark(project, "done")
     run_checked(command("repo_registry.py", "sync", "--root", str(root)), cwd=root, timeout=args.timeout)
 
 

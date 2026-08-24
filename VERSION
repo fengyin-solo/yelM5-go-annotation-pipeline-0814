@@ -54,3 +54,4 @@
 2026-08-23 防答案泄漏拓扑改造：不再发布 main/干净基座；每条使用 orphan bugNNN_green G1→G2 与 orphan bugNNN_red R1；G1 零测试且生成 SHA-256 快照清单；finalize 在轨迹与绿灯后创建 G2/R1；轨迹审计改为 cheat/suspect/clean；post_qc 新增远程分支、共同祖先、文件树、快照与时序硬校验
 2026-08-24 校验收敛：post_qc 默认改为核对当前输入指纹绑定的 preflight/Docker 运行证据，仅 --recheck-runtime 显式复跑；4 文件/20 行、双机制、3 模块、四文件回退和固定题面结构降为辅助/可选证据；文案连续重复默认只提示，安全隔离、真实性、轨迹和仓库拓扑硬门禁保留。
 2026-08-24 交付说明调整：停止生成和提交 BUG_REPRO.md，项目目录与 green/red 分支均禁止该文件；workspace 创建记录时强制写入单行 project_summary.txt，发布时将其作为 BENZHI_README.md 第一行，并由 preflight/post_qc/仓库拓扑检查共同校验。
+2026-08-24 并发编排调整：移除全批次 G1/模型/finalize 阶段屏障，改为不同记录独立流水线；新增记录、状态、staging repo、注册表和 Excel 跨进程锁，同仓 Git 写短串行、不同仓库并行，指定记录 post-QC 并发执行。

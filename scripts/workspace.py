@@ -34,6 +34,7 @@
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 
 from project_summary import validate_project_summary
+from resource_lock import lock_name, resource_lock
 
 STATES = {"candidate", "selected", "done", "rejected"}
 SOURCES = {"github", "local"}
@@ -90,8 +92,21 @@ def load_status(proj: Path) -> dict:
 
 
 def save_status(proj: Path, data: dict):
-    data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    (proj / "status.json").write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = proj / "status.json"
+    status_lock = proj.parents[1] / "_locks" / "status" / lock_name(str(proj.resolve()))
+    with resource_lock(status_lock, label=f"状态 {proj.name}"):
+        current = {}
+        if path.exists():
+            current = json.loads(path.read_text(encoding="utf-8"))
+        pipeline = current.get("pipeline")
+        current.update({key: value for key, value in data.items() if key != "pipeline"})
+        if pipeline is not None:
+            current["pipeline"] = pipeline
+        data = current
+        data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
 
 
 def find_project(root: Path, name: str, date: str) -> Path | None:

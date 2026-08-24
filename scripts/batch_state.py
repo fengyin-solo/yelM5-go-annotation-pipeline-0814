@@ -8,6 +8,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from resource_lock import lock_name, resource_lock
+
 
 PIPELINE_SCHEMA = 1
 STAGES = (
@@ -38,29 +40,31 @@ def update_status(project: Path, *, stage: str | None = None, result: str | None
                   detail: str = "", fingerprint: str | None = None,
                   attempt: dict | None = None) -> dict:
     path = project / "status.json"
-    data = load_json(path)
-    pipeline = data.setdefault("pipeline", {"schema": PIPELINE_SCHEMA, "stages": {}, "attempt_history": []})
-    pipeline["schema"] = PIPELINE_SCHEMA
-    if stage:
-        if stage not in STAGES:
-            raise ValueError(f"unknown pipeline stage: {stage}")
-        item = pipeline.setdefault("stages", {}).setdefault(stage, {})
-        item.update({"result": result or "passed", "updated_at": now()})
-        if detail:
-            item["detail"] = detail
-        if result in (None, "passed"):
-            pipeline["stage"] = stage
-    if fingerprint is not None:
-        pipeline["input_fingerprint"] = fingerprint
-    if attempt:
-        pipeline.setdefault("attempt_history", []).append({**attempt, "at": now()})
-    data["updated_at"] = now()
-    atomic_json(path, data)
-    if attempt:
-        atomic_json(project / "_evidence" / "attempt_history.json", {
-            "schema": PIPELINE_SCHEMA,
-            "attempts": pipeline["attempt_history"],
-        })
+    status_lock = project.parents[1] / "_locks" / "status" / lock_name(str(project.resolve()))
+    with resource_lock(status_lock, label=f"状态 {project.name}"):
+        data = load_json(path)
+        pipeline = data.setdefault("pipeline", {"schema": PIPELINE_SCHEMA, "stages": {}, "attempt_history": []})
+        pipeline["schema"] = PIPELINE_SCHEMA
+        if stage:
+            if stage not in STAGES:
+                raise ValueError(f"unknown pipeline stage: {stage}")
+            item = pipeline.setdefault("stages", {}).setdefault(stage, {})
+            item.update({"result": result or "passed", "updated_at": now()})
+            if detail:
+                item["detail"] = detail
+            if result in (None, "passed"):
+                pipeline["stage"] = stage
+        if fingerprint is not None:
+            pipeline["input_fingerprint"] = fingerprint
+        if attempt:
+            pipeline.setdefault("attempt_history", []).append({**attempt, "at": now()})
+        data["updated_at"] = now()
+        atomic_json(path, data)
+        if attempt:
+            atomic_json(project / "_evidence" / "attempt_history.json", {
+                "schema": PIPELINE_SCHEMA,
+                "attempts": pipeline["attempt_history"],
+            })
     return data
 
 

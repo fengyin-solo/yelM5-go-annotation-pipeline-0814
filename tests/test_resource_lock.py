@@ -21,6 +21,15 @@ def _hold_resource(path: str, hold_seconds: float, queue) -> None:
         time.sleep(hold_seconds)
 
 
+def _append_status_attempt(project: str, attempt: int) -> None:
+    from batch_state import update_status
+
+    update_status(
+        Path(project), stage="main_running", result="failed",
+        attempt={"stage": "main_running", "attempt": attempt, "result": "failed"},
+    )
+
+
 class ResourceLockTest(unittest.TestCase):
     def test_same_resource_serializes_but_different_resources_overlap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,6 +81,45 @@ class ResourceLockTest(unittest.TestCase):
             entry = data["repositories"][0]
             self.assertEqual(2, entry["uses"])
             self.assertEqual(["demo__001", "demo__002"], entry["projects"])
+
+    def test_concurrent_status_updates_keep_both_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "2026-08-24" / "demo__001"
+            project.mkdir(parents=True)
+            (project / "status.json").write_text('{"name":"demo__001"}\n', encoding="utf-8")
+            ctx = multiprocessing.get_context("spawn")
+            processes = [
+                ctx.Process(target=_append_status_attempt, args=(str(project), attempt))
+                for attempt in (1, 2)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=3)
+                self.assertEqual(0, process.exitcode)
+            status = json.loads((project / "status.json").read_text(encoding="utf-8"))
+            attempts = status["pipeline"]["attempt_history"]
+            self.assertEqual([1, 2], sorted(item["attempt"] for item in attempts))
+
+    def test_workspace_state_update_preserves_pipeline_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "2026-08-24" / "demo__001"
+            project.mkdir(parents=True)
+            (project / "status.json").write_text(json.dumps({
+                "name": "demo__001", "state": "selected",
+                "pipeline": {"stage": "green_passed", "attempt_history": [{"attempt": 1}]},
+            }), encoding="utf-8")
+            result = subprocess.run([
+                sys.executable, str(SCRIPTS / "workspace.py"), "set",
+                "--root", str(root), "--project", "demo__001", "--date", "2026-08-24",
+                "--state", "done",
+            ], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            status = json.loads((project / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual("done", status["state"])
+            self.assertEqual("green_passed", status["pipeline"]["stage"])
+            self.assertEqual([{"attempt": 1}], status["pipeline"]["attempt_history"])
 
 
 if __name__ == "__main__":

@@ -159,13 +159,14 @@ python3 <skill>/scripts/batch_pipeline.py resume --root .
 python3 <skill>/scripts/batch_pipeline.py status --root .
 ```
 
-批处理默认 `--model-workers 2`；遇到模型服务限流时可传 `--model-workers 1` 恢复全局串行。G1 发布和同一 staging Git 仓库上的 finalize 始终串行，模型阶段完成后再依次创建 G2/R1。
+批处理默认用 `--workers 3` 推进不同记录、用 `--model-workers 2` 限制目标模型；遇到模型服务限流时可传 `--model-workers 1` 恢复模型全局串行。每条记录独立执行 G1 发布→红灯→正式轨迹→绿灯→finalize，不再等待整批记录到达同一阶段。同一 staging Git 仓库的写操作按仓库加跨进程锁，不同仓库可并行。
 
 - `status.json.pipeline` 是批次阶段、输入指纹和 `attempt_history` 的唯一事实源；原有 `state` 继续管理 workspace 生命周期。
 - 预检按批次中每个 `go.mod` 版本分别验证工具链切换、`-race`、测试二进制和 `LC_UUID` 能力，并发执行本地 Go 检查（默认 3 条），Docker 单独限流（默认 1 条）。`LC_UUID` 只在 evaluator 明确依赖它时硬失败；无此依赖时仍记录能力结果，由真实红灯断言到达门禁阻断工具链假红。只有输入指纹未变时才复用结果。
 - 红灯、正式轨迹、绿灯共用跨进程测试模型槽位，默认最多 2 路并发；同一记录仍严格按红灯→正式轨迹→绿灯执行。瞬时进程错误按上限重试；evaluator 编译、轨迹守卫和回归失败立即停止；同一 diagnosis/private_verify 失败签名第二次出现即熔断，修改输入后必须重新 preflight。
+- 同一记录的整条流水线有跨进程记录锁，避免两个批次重复更新其 `status.json` 和证据产物；Git 的 ensure/publish/finalize 另有按 staging repo 的跨进程锁，只锁 checkout/commit/push 临界区，不占用模型执行时间。
 - diagnosis 在 PreToolUse 就禁止 Edit/Write 和明确 Bash 写操作，跑后仍做零 diff 与「文件/符号/机制」根因语义验收。
-- 证据轨迹先本地生成，全部质量门禁通过后再并发上传；Excel 和注册表各只在批末重建一次。
+- 证据轨迹先本地生成，通过质量门禁后并发上传；Excel 和注册表各只在批末重建一次，并分别用跨进程写锁保护。
 - `--skip-upload` 会留下完整本地产物；后续 `resume` 只补上传和同步，不重跑测试模型。
 
 ## 第 1 步：选题准备（0-1 项目 + 去重）
@@ -677,7 +678,7 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 
 red / green / 修复轨迹共用跨进程模型槽位，默认全局最多同时运行 2 路。`batch_pipeline.py` 默认传 `--model-workers 2`；`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 默认使用 `--model-slots 2`，槽位文件位于 `~/.codex/go-annotation-pipeline/model-slots/`，等待超时仍由 `--lock-timeout` 控制。需要规避服务限流时统一设为 1，恢复全局串行。
 
-同一记录内部必须保持红灯→正式轨迹→绿灯顺序；G1 发布、G2/R1 finalize 和同一 staging Git 仓库的写操作仍必须串行。不同记录的模型调用使用各自隔离工作区，并发不得删除、抽样或降级任何门禁。
+同一记录内部必须保持 G1 发布→红灯→正式轨迹→绿灯→G2/R1 finalize 顺序。不同记录独立推进并使用各自隔离工作区；同仓库的 Git 写临界区通过仓库锁串行，不同仓库的 Git 写可并行。并发不得删除、抽样或降级任何门禁。
 
 ### 生成并回填 verify_result
 
