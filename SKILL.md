@@ -131,7 +131,7 @@ prepared -> preflight_passed -> g1_published -> red_passed -> main_running
 | `python3 <skill>/scripts/workspace.py` | 工作区与项目状态：`init` / `new-project` / `list` / `set` / `reject` / `purge` |
 | `python3 <skill>/scripts/pick_bug_pattern.py` | 随机抽取深度埋错模式（P1–P12）：`--category` 过滤 / `--exclude` 排除同 repo 已用 / `--list` |
 | `python3 <skill>/scripts/difficulty_review.py` | 私有难度审查单：`init` 创建模板 / `check` 校验运行时机制、跨层触发、题面覆盖和逐文件回退证据 |
-| `python3 <skill>/scripts/contract_coverage.py` | evaluator 契约覆盖：`init` 提取每条直接失败断言 / `check` 校验题面触发、预期、success_criteria 与难度证据四方映射 |
+| `python3 <skill>/scripts/contract_coverage.py` | evaluator 契约覆盖：`init` 提取每条直接失败断言 / `check` 校验题面触发、预期、success_criteria、难度证据和精确输入边界映射 |
 | `python3 <skill>/scripts/github_project.py` | GitHub public repo 创建与 orphan 分支管理：`ensure` / `publish` / `finalize` |
 | `python3 <skill>/scripts/collection_table.py` | 收集表填表数据：`new` / `write` / `sync` / `list` |
 | `python3 <skill>/scripts/run_trajectory.py` | 跑轨迹与失败回滚 |
@@ -145,7 +145,7 @@ prepared -> preflight_passed -> g1_published -> red_passed -> main_running
 | `python3 <skill>/scripts/domain_guard.py` | 禁止项目/功能点最低门禁：建仓和埋错前检查项目描述、仓库名、README 与候选功能点；通过后仍须人工语义审查 |
 | `python3 <skill>/scripts/post_qc.py` | **后置质检**（交付前硬校验）：`--root .` 对整期所有记录做预检留证/隐私门禁/build/scope/red/green/文件/字段/证据/轨迹守卫/诊断零改动/验证命令覆盖/难度审查/禁止领域/仓库拓扑检查 |
 | `python3 <skill>/scripts/batch_pipeline.py` | 推荐批次入口：`preflight` / `run` / `resume` / `status`，负责一次性预检、状态恢复、自动流转、本地并发和批末集中同步 |
-| `python3 <skill>/scripts/batch_preflight.py` | 单独批次预检：工具链 canary、输入指纹、20/20 红绿校准、目标断言到达和 bugfix 四文件回退实跑留证 |
+| `python3 <skill>/scripts/batch_preflight.py` | 单独批次预检：工具链 canary、输入指纹、无原始测试 evaluator 编译、diagnosis 验收器自检、20/20 红绿校准、目标断言到达和 bugfix 四文件回退实跑留证 |
 
 ## 批次编排（多条记录默认使用）
 
@@ -158,9 +158,11 @@ python3 <skill>/scripts/batch_pipeline.py resume --root .
 python3 <skill>/scripts/batch_pipeline.py status --root .
 ```
 
+批处理默认 `--model-workers 2`；遇到模型服务限流时可传 `--model-workers 1` 恢复全局串行。G1 发布和同一 staging Git 仓库上的 finalize 始终串行，模型阶段完成后再依次创建 G2/R1。
+
 - `status.json.pipeline` 是批次阶段、输入指纹和 `attempt_history` 的唯一事实源；原有 `state` 继续管理 workspace 生命周期。
 - 预检按批次中每个 `go.mod` 版本分别验证工具链切换、`-race`、测试二进制和 `LC_UUID` 能力，并发执行本地 Go 检查（默认 3 条），Docker 单独限流（默认 1 条）。`LC_UUID` 只在 evaluator 明确依赖它时硬失败；无此依赖时仍记录能力结果，由真实红灯断言到达门禁阻断工具链假红。只有输入指纹未变时才复用结果。
-- 红灯、正式轨迹、绿灯仍共用全局测试模型锁，不并发；正式轨迹只在语义验收失败时归档后重跑，最多 3 次。
+- 红灯、正式轨迹、绿灯共用跨进程测试模型槽位，默认最多 2 路并发；同一记录仍严格按红灯→正式轨迹→绿灯执行。瞬时进程错误按上限重试；evaluator 编译、轨迹守卫和回归失败立即停止；同一 diagnosis/private_verify 失败签名第二次出现即熔断，修改输入后必须重新 preflight。
 - diagnosis 在 PreToolUse 就禁止 Edit/Write 和明确 Bash 写操作，跑后仍做零 diff 与「文件/符号/机制」根因语义验收。
 - 证据轨迹先本地生成，全部质量门禁通过后再并发上传；Excel 和注册表各只在批末重建一次。
 - `--skip-upload` 会留下完整本地产物；后续 `resume` 只补上传和同步，不重跑测试模型。
@@ -363,7 +365,7 @@ python3 <skill>/scripts/contract_coverage.py check --project <project>
 - `query_evidence` 的触发与预期片段、`symptom_coverage` 的至少 2 个症状片段必须逐字来自 `user_query`；每个症状都写明目标测试中的对应断言。
 - bugfix 的 `repair_ablation_checks` 至少列 4 个不同功能 Go 文件。逐个暂时回退该文件的关键修复、执行原样 `verify_cmds`，只有每次都重新变红才能填 `result: "red"`；完成后恢复 gold。
 - `manual_reviewed` 只能在真实审阅代码、diff 和复跑结果后设为 `true`。脚本只校验证据结构，不能代替人工判断机制是否真实。
-- `contract_coverage.json` 中每条 evaluator `Fatal/Fatalf/Error/Errorf` 都必须映射到题面触发片段、题面预期片段、`success_criteria` 片段和 `difficulty_review.json` 证据片段。evaluator 改动会改变断言 ID，旧映射立即失效，禁止带着不完整题面进入正式轨迹。
+- 新建的 `contract_coverage.json` 使用 version 2：除每条 evaluator `Fatal/Fatalf/Error/Errorf` 映射到题面触发、题面预期、`success_criteria` 和难度证据外，`test_cases` 还必须将 evaluator 设置输入的精确源码片段映射到题面触发与预期。输入片段不能拿断言文案代替；空字符串或 nil 边界必须在题面片段中点名对应字段。题面包含“照常/仍能/不影响”等既有行为要求时，必须增加 `kind: preservation` 映射。旧 version 1 成品只做兼容复核，新数据不得手工降级。
 
 ### 4.2 题面去重自检（必做）
 
@@ -505,7 +507,9 @@ python3 <skill>/scripts/trajectory_guard.py preflight \
 - 失败的尝试留档为 `<project>/trajectory.failN.jsonl`。
 - 跑完后项目目录里的交付轨迹**文件名必须是 `<session_id>.jsonl`**（Claude Code 原始 session 文件，脚本自动取出）；脚本自动保证三处一致：文件名 == `collection.json` 的 `session_id` == 轨迹内的 `sessionId`。同名 `*.stream.jsonl` 是运行校验副本，不交付。
 - 跑轨迹期间尽量断网；脚本默认禁 `WebFetch` / `WebSearch` / `Bash(git clone *)` / `Bash(curl *)` / `Bash(wget *)`。
-- **测试模型限流，全局串行（红线）**：修复轨迹、红灯、绿灯都调同一个测试模型，`run_trajectory.py run` 与 `run_evidence_trajectories.py generate` 共用全局锁 `~/.codex/go-annotation-pipeline/test_model.lock`，跑之前会自动排队等待，同一时刻只允许一条测试模型任务在跑。
+- **测试模型限流，全局两路并发（红线）**：修复轨迹、红灯、绿灯都调同一个测试模型，`run_trajectory.py run` 与 `run_evidence_trajectories.py generate` 共用跨进程槽位，默认同一时刻最多运行两条模型任务；传 `--model-slots 1` 可恢复串行。
+- **跑前验收仿真（红线）**：preflight 必须删除原始 `*_test.go`，只注入 evaluator 后编译全部包，禁止 evaluator 依赖原项目测试 helper；diagnosis 还必须用 `gold_root_cause` 通过与正式轨迹相同的文件/符号/机制验收器。任一失败都不得调用目标模型。
+- **确定性失败熔断（红线）**：evaluator 编译失败、轨迹守卫命中和全量回归失败不得自动重跑；同一输入指纹下相同 diagnosis 或 private test 失败第二次出现即停止。修改 prompt、evaluator、collection 或验收契约后必须重新 preflight，不能沿用旧输入继续 retry。
 
 ## 第 8 步：轨迹质检四查
 
@@ -676,11 +680,11 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 - **绿灯达标（仅 bugfix）**：结论含「已修复」且不含「未修复」；除脚本预先注入的 `evaluator/` 测试外，验证环境零改动。不达标则回滚重跑第 7 步并重新质检。
 - 每条证据最多自动重试 3 次；每次重试前从基线 / 修复后 `env/` 重新 rsync 验证环境。
 
-### 全局串行（红线）
+### 全局两路并发（红线）
 
-red / green / 修复轨迹都调用同一个限流测试模型，必须全局串行。`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 共用全局锁 `~/.codex/go-annotation-pipeline/test_model.lock`，自动排队等待（`--lock-timeout 0` 表示一直等）。
+red / green / 修复轨迹共用跨进程模型槽位，默认全局最多同时运行 2 路。`batch_pipeline.py` 默认传 `--model-workers 2`；`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 默认使用 `--model-slots 2`，槽位文件位于 `~/.codex/go-annotation-pipeline/model-slots/`，等待超时仍由 `--lock-timeout` 控制。需要规避服务限流时统一设为 1，恢复全局串行。
 
-只有不调用目标模型、不共享可变工作区的本地任务允许并发：代码分析、临时副本中的 evaluator、全量回归、基线 diff 以及不同记录的 post-QC。并发不得删除、抽样或降级任何门禁。
+同一记录内部必须保持红灯→正式轨迹→绿灯顺序；G1 发布、G2/R1 finalize 和同一 staging Git 仓库的写操作仍必须串行。不同记录的模型调用使用各自隔离工作区，并发不得删除、抽样或降级任何门禁。
 
 ### 生成并回填 verify_result
 

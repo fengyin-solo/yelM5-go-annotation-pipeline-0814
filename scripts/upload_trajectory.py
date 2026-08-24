@@ -162,15 +162,16 @@ def _upload_file_once(path: Path, filename: str, cookie: str) -> dict:
         raise RuntimeError(f"curl 失败: {r.stderr[:300]}")
     body = r.stdout.strip()
     low = body.lower()
-    if any(k in low for k in ("login", "unauthorized", "expired", "session", "sid")) and "files" not in low:
+    expired_markers = ("login", "unauthorized", "expired", "session", "sid", "登录已失效", "登录失效", "未登录")
+    if any(k in low for k in expired_markers) and "files" not in low:
         raise CookieExpiredError(GUIDANCE)
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
-        raise CookieExpiredError(GUIDANCE) if "login" in low or "expired" in low else RuntimeError(f"响应不是 JSON: {body[:300]}")
+        raise CookieExpiredError(GUIDANCE) if any(k in low for k in expired_markers) else RuntimeError(f"响应不是 JSON: {body[:300]}")
     files = data.get("files") or []
     if not data.get("ok") or not files:
-        if "login" in low or "expired" in low or "unauthorized" in low:
+        if any(k in low for k in expired_markers):
             raise CookieExpiredError(GUIDANCE)
         raise RuntimeError(f"上传返回异常: {body[:300]}")
     return files[0]

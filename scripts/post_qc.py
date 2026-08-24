@@ -103,7 +103,11 @@ def find_projects(root: Path, date: str | None, project: str | None) -> list[Pat
 def detect_go_version(proj: Path) -> str:
     for mod in (proj / "go.mod", proj / "backend" / "go.mod"):
         if mod.exists():
-            m = re.search(r"^go\s+([0-9]+\.[0-9]+)", mod.read_text(encoding="utf-8", errors="ignore"), re.M)
+            m = re.search(
+                r"^go\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)",
+                mod.read_text(encoding="utf-8", errors="ignore"),
+                re.M,
+            )
             if m:
                 return m.group(1)
     return ""

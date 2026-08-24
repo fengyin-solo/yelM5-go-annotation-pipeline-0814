@@ -18,9 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_state import atomic_json, input_fingerprint, iter_projects, load_json, now, update_status  # noqa: E402
 from contract_coverage import validate_manifest  # noqa: E402
 from difficulty_review import validate_review  # noqa: E402
-from trajectory_guard import inject_evaluator, private_test_issues  # noqa: E402
+from trajectory_guard import copy_without_tests, inject_evaluator, private_test_issues  # noqa: E402
 from user_query_rules import user_query_go_version_issues  # noqa: E402
 from verify_cmds import CONCURRENCY_CATEGORY, validate_concurrency_metadata, validate_verify_cmds  # noqa: E402
+
+PREFLIGHT_GATE_VERSION = 2
 
 
 def run(command, cwd: Path, *, env=None, timeout=1800, shell=False) -> subprocess.CompletedProcess:
@@ -153,6 +155,37 @@ def _run_calibration(source: Path, evaluator: Path, verify_cmd: str, expected: s
             "passed": len(runs) == count and all(x["observed"] == expected for x in runs), "runs": runs}
 
 
+def _isolated_evaluator_compile(source: Path, evaluator: Path, env: dict[str, str], timeout: int) -> dict:
+    """Compile evaluator in the exact no-original-tests shape used by formal acceptance."""
+    with tempfile.TemporaryDirectory(prefix="evaluator-self-contained-") as tmp:
+        workspace = Path(tmp) / "workspace"
+        copy_without_tests(source, workspace)
+        inject_evaluator(evaluator, workspace)
+        module = find_module(workspace)
+        if module is None:
+            return {"passed": False, "exit_code": None, "output_tail": "cannot locate isolated go.mod"}
+        result = run(["go", "test", "./...", "-run", "^$", "-count=1"], module, env=env, timeout=timeout)
+        output = (result.stdout + result.stderr)[-3000:]
+        return {"passed": result.returncode == 0, "exit_code": result.returncode, "output_tail": output}
+
+
+def _diagnosis_acceptance_precheck(project: Path) -> dict:
+    """Ensure the configured gold diagnosis is recognizable by the formal hard gate."""
+    from trajectory_acceptance import _diagnosis_root_cause_check
+
+    collection = load_json(project / "collection.json")
+    answer = str(collection.get("gold_root_cause") or "").strip()
+    if not answer:
+        return {"passed": False, "exit_code": 1, "output": "gold_root_cause is empty"}
+    with tempfile.TemporaryDirectory(prefix="diagnosis-acceptance-precheck-") as tmp:
+        transcript = Path(tmp) / "gold.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": answer}]},
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        return _diagnosis_root_cause_check(project, transcript)
+
+
 def _assertion_reached(calibration: dict, project: Path) -> dict:
     import re
     manifest = load_json(project / "contract_coverage.json")
@@ -213,7 +246,8 @@ def _run_ablation(project: Path, gold: Path, evaluator: Path, verify_cmd: str,
 
 
 def _functional_diff(env: Path, gold: Path) -> tuple[int, int]:
-    result = subprocess.run(["git", "diff", "--no-index", "--numstat", str(env), str(gold)],
+    result = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--no-index", "--numstat",
+                             str(env), str(gold)],
                             capture_output=True, text=True)
     files = lines = 0
     for row in result.stdout.splitlines():
@@ -234,7 +268,8 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
     evidence_path = project / "_evidence" / "preflight.json"
     if evidence_path.exists() and not force:
         cached = load_json(evidence_path)
-        if cached.get("fingerprint") == fingerprint and cached.get("result") == "passed":
+        if (cached.get("gate_version") == PREFLIGHT_GATE_VERSION
+                and cached.get("fingerprint") == fingerprint and cached.get("result") == "passed"):
             update_status(project, stage="preflight_passed", fingerprint=fingerprint, detail="cached")
             return cached
     issues = []
@@ -267,7 +302,8 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
         if files < 4 or lines < 20:
             issues.append(f"bugfix functional diff too small: {files} files, {lines} lines")
     if issues:
-        payload = {"schema": 1, "fingerprint": fingerprint, "result": "failed", "issues": issues,
+        payload = {"schema": 1, "gate_version": PREFLIGHT_GATE_VERSION,
+                   "fingerprint": fingerprint, "result": "failed", "issues": issues,
                    "completed_at": now()}
         atomic_json(evidence_path, payload)
         update_status(project, stage="prepared", result="failed", detail="; ".join(issues[:3]),
@@ -280,6 +316,11 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
         result = run(command, module, env=env, timeout=timeout)
         checks[label] = {"passed": result.returncode == 0, "exit_code": result.returncode,
                          "output_tail": (result.stdout + result.stderr)[-3000:]}
+    checks["isolated_evaluator_compile"] = _isolated_evaluator_compile(
+        project / "env", project / "evaluator", env, timeout
+    )
+    if task_type == "diagnosis":
+        checks["diagnosis_acceptance_precheck"] = _diagnosis_acceptance_precheck(project)
     checks["red_calibration"] = _run_calibration(
         project / "env", project / "evaluator", verify_cmd, "red", env, calibration_runs, timeout
     )
@@ -292,7 +333,8 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
             project, gold, project / "evaluator", verify_cmd, env, timeout
         )
     passed = all(item.get("passed") is True for item in checks.values())
-    payload = {"schema": 1, "fingerprint": fingerprint, "result": "passed" if passed else "failed",
+    payload = {"schema": 1, "gate_version": PREFLIGHT_GATE_VERSION,
+               "fingerprint": fingerprint, "result": "passed" if passed else "failed",
                "calibration_runs": calibration_runs, "checks": checks, "completed_at": now()}
     atomic_json(evidence_path, payload)
     update_status(project, stage="preflight_passed" if passed else "prepared",

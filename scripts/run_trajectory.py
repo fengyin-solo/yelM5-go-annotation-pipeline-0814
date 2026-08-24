@@ -511,8 +511,8 @@ def cmd_run(args):
           }]},
       }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-      # 测试模型限流：red / green / 修复轨迹必须全局串行；整个重试循环持锁。
-      with test_model_lock(timeout=lock_timeout):
+      # 测试模型限流：red / green / 修复轨迹共用全局并发槽位；整个重试循环持槽位。
+      with test_model_lock(timeout=lock_timeout, slots=args.model_slots):
        for attempt in range(1, args.max_attempts + 1):
         try:
             method = rollback(work_env, work_snapshot)
@@ -692,7 +692,9 @@ def main():
     c.add_argument("--verify-cmds", help="仅用于识别私有目标测试；修复轨迹阶段绝不执行该命令")
     c.add_argument("--evaluator", help="私有测试目录；缺省为 <project>/evaluator")
     c.add_argument("--g1-manifest", help="G1 模型快照清单；缺省为 <project>/_delivery/g1_snapshot.json")
-    c.add_argument("--lock-timeout", type=int, default=0, help="全局串行锁等待秒数；0 表示一直等")
+    c.add_argument("--lock-timeout", type=int, default=0, help="全局模型槽位等待秒数；0 表示一直等")
+    c.add_argument("--model-slots", type=int, choices=(1, 2), default=2,
+                   help="跨批次目标模型最大并发数；默认 2")
     c.set_defaults(func=cmd_run)
 
     c = sub.add_parser("check")

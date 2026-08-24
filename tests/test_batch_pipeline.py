@@ -3,6 +3,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -91,6 +93,99 @@ class BatchPipelineTest(unittest.TestCase):
             registry_sync = [cmd for cmd in calls if "repo_registry.py" in " ".join(cmd) and "sync" in cmd]
             self.assertEqual(1, len(sync_calls))
             self.assertEqual(1, len(registry_sync))
+
+    def test_model_phases_run_two_records_at_a_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = [root / f"demo__{index:03d}" for index in range(1, 5)]
+            active = 0
+            peak = 0
+            lock = threading.Lock()
+
+            def fake_phases(project, phase_root, args):
+                nonlocal active, peak
+                self.assertEqual(root, phase_root)
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+
+            args = type("Args", (), {"model_workers": 2})()
+            with patch.object(batch_pipeline, "model_phases", side_effect=fake_phases):
+                batch_pipeline.run_model_phases(projects, root, args)
+            self.assertEqual(2, peak)
+
+    def test_model_phases_keep_each_record_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "demo__001"
+            calls = []
+            args = type("Args", (), {})()
+            with patch.object(batch_pipeline, "red", side_effect=lambda *unused: calls.append("red")), patch.object(
+                batch_pipeline, "main_trajectory", side_effect=lambda *unused: calls.append("main")
+            ), patch.object(batch_pipeline, "green", side_effect=lambda *unused: calls.append("green")):
+                batch_pipeline.model_phases(project, root, args)
+            self.assertEqual(["red", "main", "green"], calls)
+
+    @unittest.skipUnless(shutil.which("go"), "Go toolchain is required")
+    def test_isolated_evaluator_compile_rejects_original_test_helper_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "env"
+            evaluator = root / "evaluator"
+            source.mkdir()
+            evaluator.mkdir()
+            (source / "go.mod").write_text("module example.com/demo\n\ngo 1.23\n", encoding="utf-8")
+            (source / "demo.go").write_text("package demo\n", encoding="utf-8")
+            (source / "original_test.go").write_text(
+                'package demo\nimport "testing"\nfunc setupOriginal(t *testing.T) {}\n', encoding="utf-8"
+            )
+            (evaluator / "target_test.go").write_text(
+                'package demo\nimport "testing"\nfunc TestTarget(t *testing.T) { setupOriginal(t) }\n', encoding="utf-8"
+            )
+            result = batch_preflight._isolated_evaluator_compile(source, evaluator, os.environ.copy(), 120)
+            self.assertFalse(result["passed"])
+            self.assertIn("undefined: setupOriginal", result["output_tail"])
+
+    def test_diagnosis_acceptance_precheck_rejects_unrecognizable_gold_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(Path(tmp))
+            data = load_json(project / "collection.json")
+            data.update({
+                "task_type": "diagnosis",
+                "gold_root_cause": "文件: x.go 符号: UpdateThing 机制: 自定义业务描述，没有可识别的双重机制。",
+            })
+            (project / "collection.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            (project / "difficulty_review.json").write_text(json.dumps({
+                "core_defect_review": {"root_cause_locations": [{"file": "x.go"}]}
+            }), encoding="utf-8")
+            result = batch_preflight._diagnosis_acceptance_precheck(project)
+            self.assertFalse(result["passed"])
+            self.assertIn("required_mechanisms", result["output"])
+
+    def test_same_private_failure_stops_after_second_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = self.make_project(root)
+            fingerprint = input_fingerprint(project, root)
+            update_status(project, stage="preflight_passed", fingerprint=fingerprint)
+            args = type("Args", (), {
+                "main_attempts": 3, "rerun_reason": None, "model_timeout": 1, "model_workers": 2,
+            })()
+            error = RuntimeError(
+                "trajectory acceptance failed\n"
+                "- private_verify: --- FAIL: TestBoundary (0.00s)\n"
+                "target_test.go:42: status=201"
+            )
+            with patch.object(batch_pipeline, "run_checked", side_effect=error) as run:
+                with self.assertRaisesRegex(RuntimeError, "重复确定性失败已熔断"):
+                    batch_pipeline.main_trajectory(project, root, args)
+            self.assertEqual(2, run.call_count)
+            attempts = load_json(project / "_evidence" / "attempt_history.json")["attempts"]
+            failures = [item for item in attempts if item.get("result") == "failed"]
+            self.assertEqual("private_verify:TestBoundary", failures[-1]["failure_signature"])
 
     @unittest.skipUnless(shutil.which("go"), "Go toolchain is required")
     def test_real_calibration_reaches_contract_and_ablation_rered(self):

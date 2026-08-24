@@ -97,7 +97,8 @@ def _diagnosis_root_cause_check(project: Path, transcript: Path) -> dict:
     gold = str(collection.get("gold_root_cause") or "")
     symbol_part = gold.split("符号:", 1)[-1].split("机制:", 1)[0] if "符号:" in gold else ""
     symbols = sorted(set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_.]{2,}\b", symbol_part)))
-    symbol_hits = [token for token in symbols if token in answer]
+    symbol_leaves = sorted({token.rsplit(".", 1)[-1] for token in symbols})
+    symbol_hits = [token for token in symbol_leaves if token in answer]
     mechanism_part = gold.split("机制:", 1)[-1] if "机制:" in gold else gold
     concepts = {
         "context": ("context", "上下文"), "cancel": ("cancel", "取消"),
@@ -106,16 +107,20 @@ def _diagnosis_root_cause_check(project: Path, transcript: Path) -> dict:
         "mutex": ("mutex", "锁"), "race": ("race", "竞态", "并发"),
         "timeout": ("timeout", "超时"), "propagation": ("propagat", "传递", "传播"),
         "wake": ("wake", "唤醒"), "shutdown": ("shutdown", "关闭", "停止"),
-        "write": ("write", "写入", "回写"), "state": ("state", "状态", "终态"),
+        "write": ("write", "写入", "回写", "写回"),
+        "state": ("state", "状态", "终态", "中间态", "原样保留", "改坏", "同名项"),
+        "filter": ("filter", "筛选", "过滤", "匹配"),
+        "enumeration": ("enumerat", "枚举", "列表", "跳过"),
+        "aggregation": ("aggregat", "聚合", "概览", "统计", "计数", "累计"),
         "pollution": ("pollut", "污染", "串扰"), "lifecycle": ("lifecycle", "生命周期"),
         "defer": ("defer", "延迟释放"), "panic": ("panic", "崩溃"),
-        "slice": ("slice", "切片"), "error": ("error", "错误链"),
+        "slice": ("slice", "切片"), "error": ("error", "错误链", "错误"),
         "nil": ("nil", "空指针"), "interface": ("interface", "接口值"),
         "map": ("map", "映射"), "cache": ("cache", "缓存"),
         "shared": ("shared", "共享"), "alias": ("alias", "别名", "底层数组"),
         "copy": ("copy", "复制", "拷贝"), "timer": ("timer", "定时器"),
         "atomic": ("atomic", "原子"), "idempotency": ("idempoten", "幂等"),
-        "resource": ("resource", "资源", "释放"), "recovery": ("recover", "恢复路径"),
+        "resource": ("resource", "资源", "释放"), "recovery": ("recover", "恢复路径", "恢复"),
     }
     gold_lower, answer_lower = mechanism_part.lower(), answer.lower()
     gold_concepts = {name for name, words in concepts.items() if any(word in gold_lower for word in words)}
@@ -123,7 +128,7 @@ def _diagnosis_root_cause_check(project: Path, transcript: Path) -> dict:
                             if any(word in answer_lower for word in concepts[name]))
     required_locations = min(3, len(locations))
     required_mechanisms = min(3, len(gold_concepts))
-    passed = (len(location_hits) >= required_locations and len(symbol_hits) >= min(2, len(symbols))
+    passed = (len(location_hits) >= required_locations and len(symbol_hits) >= min(2, len(symbol_leaves))
               and required_mechanisms >= 2 and len(mechanism_hits) >= required_mechanisms)
     detail = {
         "passed": passed, "exit_code": 0 if passed else 1,

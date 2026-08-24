@@ -93,7 +93,13 @@ def initialize_manifest(project: Path, force: bool = False) -> Path:
             "success_criteria_fragment": "",
             "difficulty_evidence_fragment": "",
         })
-    payload = {"version": 1, "contracts": rows}
+    payload = {"version": 2, "contracts": rows, "test_cases": [{
+        "kind": "target",
+        "evaluator_trigger_fragment": "",
+        "prompt_trigger_fragment": "",
+        "prompt_expected_fragment": "",
+        "success_criteria_fragment": "",
+    }]}
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return target
 
@@ -107,8 +113,17 @@ def validate_manifest(project: Path) -> tuple[bool, list[str]]:
         difficulty = _load_json(project / "difficulty_review.json")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return False, [str(exc)]
-    if manifest.get("version") != 1:
-        issues.append("contract_coverage.version must be 1")
+    version = manifest.get("version")
+    if version not in (1, 2):
+        issues.append("contract_coverage.version must be 1 or 2")
+    if version == 1:
+        try:
+            status = _load_json(project / "status.json")
+        except (OSError, ValueError, json.JSONDecodeError):
+            status = {}
+        finalized = ((status.get("pipeline") or {}).get("stages") or {}).get("finalized", {}).get("result") == "passed"
+        if status.get("state") != "done" and not finalized:
+            issues.append("active records require contract_coverage.version 2; version 1 is legacy-only")
     issues.extend(unsupported_assertions(project / "evaluator"))
     rows = manifest.get("contracts")
     if not isinstance(rows, list):
@@ -149,6 +164,60 @@ def validate_manifest(project: Path) -> tuple[bool, list[str]]:
             fragment = str(row.get(field) or "").strip()
             if len(fragment) < 4 or fragment not in haystack:
                 issues.append(f"{contract_id}.{field} must be an exact fragment of its source")
+    if version == 2:
+        cases = manifest.get("test_cases")
+        if not isinstance(cases, list) or not cases:
+            issues.append("contract_coverage.test_cases must contain at least one exact input/behavior mapping")
+        else:
+            evaluator_text = "\n".join(
+                path.read_text(encoding="utf-8", errors="replace")
+                for path in sorted((project / "evaluator").rglob("*.go"))
+            )
+            assertion_messages = {item["message"] for item in actual}
+            valid_kinds = {"target", "preservation"}
+            for index, case in enumerate(cases):
+                prefix = f"test_cases[{index}]"
+                if not isinstance(case, dict):
+                    issues.append(f"{prefix} must be an object")
+                    continue
+                if case.get("kind") not in valid_kinds:
+                    issues.append(f"{prefix}.kind must be target or preservation")
+                checks = (
+                    ("evaluator_trigger_fragment", evaluator_text),
+                    ("prompt_trigger_fragment", prompt),
+                    ("prompt_expected_fragment", prompt),
+                    ("success_criteria_fragment", success),
+                )
+                for field, haystack in checks:
+                    fragment = str(case.get(field) or "").strip()
+                    if len(fragment) < 4 or fragment not in haystack:
+                        issues.append(f"{prefix}.{field} must be an exact fragment of its source")
+                evaluator_fragment = str(case.get("evaluator_trigger_fragment") or "").strip()
+                if evaluator_fragment in assertion_messages:
+                    issues.append(f"{prefix}.evaluator_trigger_fragment must point to setup/input, not an assertion message")
+                boundary_field = re.search(
+                    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|:|=)\s*(?:\"\"|nil)",
+                    evaluator_fragment,
+                )
+                prompt_fragment = str(case.get("prompt_trigger_fragment") or "")
+                if boundary_field and boundary_field.group(1).lower() not in prompt_fragment.lower():
+                    issues.append(
+                        f"{prefix}.prompt_trigger_fragment must name boundary field {boundary_field.group(1)!r}"
+                    )
+            if isinstance(cases, list) and not any(
+                isinstance(case, dict) and case.get("kind") == "target" for case in cases
+            ):
+                issues.append("contract_coverage.test_cases must include at least one target case")
+            preservation_required = bool(re.search(
+                r"(?:照常|仍(?:能|可|应)|继续(?:支持|可用)|不能影响|不应影响|保持兼容|原有.{0,8}(?:行为|功能))",
+                prompt,
+            ))
+            if preservation_required and not any(
+                isinstance(case, dict) and case.get("kind") == "preservation" for case in cases
+            ):
+                issues.append(
+                    "prompt contains an existing-behavior requirement; test_cases must include a preservation case"
+                )
     return not issues, issues
 
 
@@ -168,7 +237,7 @@ def main() -> int:
         except FileExistsError as exc:
             print(exc)
             return 1
-        print(f"created {target}; fill every exact fragment before formal trajectory")
+        print(f"created {target}; fill every contract and test_cases exact fragment before formal trajectory")
         return 0
     ok, issues = validate_manifest(project)
     if ok:

@@ -85,7 +85,9 @@ def validate_success_criteria(collection: dict) -> list[str]:
         errors.append("success_criteria 必须原样复用 user_query 中至少一个 4 字以上业务短语，并写明该场景的具体异常或后续影响")
 
     task_type = str(collection.get("task_type") or "").strip()
-    if task_type == "diagnosis" and not re.search(r"(?:不改|未改|零改动|保持原样|没有改动|无修改)", criteria):
+    if task_type == "diagnosis" and not re.search(
+        r"(?:不改|未改|零改动|保持原样|保持不变|没有改动|无修改|不被修改|不发生变更)", criteria
+    ):
         errors.append("diagnosis 的 success_criteria 必须明确工作区或项目文件零改动")
     return errors
 

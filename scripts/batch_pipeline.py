@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Resumable batch orchestrator; target-model work remains globally serial."""
+"""Resumable batch orchestrator with bounded target-model concurrency."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -99,9 +100,45 @@ def reconcile(project: Path) -> None:
         mark(project, "done", "reconciled from workspace state")
 
 
-def fail(project: Path, stage: str, exc: Exception, attempt: int | None = None) -> None:
+def failure_metadata(exc: Exception) -> dict:
+    """Classify failures so deterministic acceptance errors do not consume blind retries."""
+    text = str(exc)
+    if "轨迹守卫命中" in text:
+        return {"failure_class": "trajectory_guard", "failure_signature": "trajectory_guard", "retryable": False}
+    if "undefined:" in text or "[build failed]" in text:
+        match = re.search(r"undefined:\s*([A-Za-z_][A-Za-z0-9_]*)", text)
+        symbol = match.group(1) if match else "build_failed"
+        return {"failure_class": "evaluator_compile", "failure_signature": f"evaluator_compile:{symbol}",
+                "retryable": False}
+    if "diagnosis_root_cause" in text:
+        return {"failure_class": "diagnosis_root_cause", "failure_signature": "diagnosis_root_cause",
+                "retryable": True, "max_same_failures": 2}
+    if "private_verify" in text:
+        match = re.search(r"--- FAIL:\s*(Test[A-Za-z0-9_]+)", text)
+        test_name = match.group(1) if match else "unknown"
+        return {"failure_class": "private_verify", "failure_signature": f"private_verify:{test_name}",
+                "retryable": True, "max_same_failures": 2}
+    if re.search(r"(?:full_regression|green_regression|\bregression:)\s*", text, re.IGNORECASE):
+        return {"failure_class": "regression", "failure_signature": "regression", "retryable": False}
+    return {"failure_class": "transient_or_unclassified", "failure_signature": "", "retryable": True}
+
+
+def fail(project: Path, stage: str, exc: Exception, attempt: int | None = None,
+         metadata: dict | None = None, fingerprint: str = "") -> int:
+    metadata = metadata or failure_metadata(exc)
+    attempt_data = {"stage": stage, "attempt": attempt, "result": "failed", "reason": str(exc)[-2000:],
+                    **{key: value for key, value in metadata.items() if key != "retryable"}}
+    if fingerprint:
+        attempt_data["input_fingerprint"] = fingerprint
     update_status(project, stage=stage, result="failed", detail=str(exc)[-2000:],
-                  attempt={"stage": stage, "attempt": attempt, "result": "failed", "reason": str(exc)[-2000:]})
+                  attempt=attempt_data)
+    signature = metadata.get("failure_signature")
+    if not signature:
+        return 1
+    history = load_json(project / "status.json").get("pipeline", {}).get("attempt_history", [])
+    return sum(1 for item in history if item.get("result") == "failed"
+               and item.get("failure_signature") == signature
+               and item.get("input_fingerprint") == fingerprint)
 
 
 def run_docker(project: Path, root: Path, timeout: int) -> None:
@@ -174,7 +211,8 @@ def red(project: Path, root: Path, args) -> None:
     require_unchanged_inputs(project, root)
     run_checked(command("run_evidence_trajectories.py", "generate", "--root", str(root),
                         "--project", project.name, "--date", project.parent.name, "--phase", "red",
-                        "--skip-upload", "--timeout", str(args.model_timeout)), cwd=root,
+                        "--skip-upload", "--timeout", str(args.model_timeout),
+                        "--model-slots", str(args.model_workers)), cwd=root,
                 timeout=args.model_timeout + 600)
     mark(project, "red_passed")
 
@@ -184,6 +222,7 @@ def main_trajectory(project: Path, root: Path, args) -> None:
         return
     require_unchanged_inputs(project, root)
     data = collection(project)
+    fingerprint = load_json(project / "status.json").get("pipeline", {}).get("input_fingerprint", "")
     max_attempts = args.main_attempts
     for attempt in range(1, max_attempts + 1):
         update_status(project, stage="main_running", result="running",
@@ -196,6 +235,7 @@ def main_trajectory(project: Path, root: Path, args) -> None:
             "--timeout", str(args.model_timeout), "--task-type", str(data["task_type"]),
             "--verify-cmds", str(data["verify_cmds"]), "--evaluator", str(project / "evaluator"),
             "--g1-manifest", str(project / "_delivery" / "g1_snapshot.json"),
+            "--model-slots", str(args.model_workers),
         )
         try:
             run_checked(cmd, cwd=root, timeout=args.model_timeout + 900)
@@ -206,12 +246,21 @@ def main_trajectory(project: Path, root: Path, args) -> None:
             mark(project, "main_accepted")
             return
         except Exception as exc:
-            fail(project, "main_running", exc, attempt)
+            metadata = failure_metadata(exc)
+            same_failures = fail(project, "main_running", exc, attempt, metadata, fingerprint)
+            if not metadata.get("retryable", True):
+                raise RuntimeError(
+                    f"确定性失败不可自动重试（{metadata['failure_signature']}），请修正输入并重新 preflight"
+                ) from exc
+            if same_failures >= int(metadata.get("max_same_failures") or 10**9):
+                raise RuntimeError(
+                    f"重复确定性失败已熔断（{metadata['failure_signature']}，连续输入指纹下已出现 {same_failures} 次）"
+                ) from exc
             if attempt == max_attempts:
                 raise
 
 
-def green_and_finalize(project: Path, root: Path, args) -> None:
+def green(project: Path, root: Path, args) -> None:
     data = collection(project)
     if data.get("task_type") == "diagnosis":
         mark(project, "green_passed", "not applicable for diagnosis")
@@ -220,9 +269,16 @@ def green_and_finalize(project: Path, root: Path, args) -> None:
     if not stage_passed(project, "green_passed"):
         run_checked(command("run_evidence_trajectories.py", "generate", "--root", str(root),
                             "--project", project.name, "--date", project.parent.name, "--phase", "green",
-                            "--skip-upload", "--timeout", str(args.model_timeout)), cwd=root,
+                            "--skip-upload", "--timeout", str(args.model_timeout),
+                            "--model-slots", str(args.model_workers)), cwd=root,
                     timeout=args.model_timeout + 900)
         mark(project, "green_passed")
+
+
+def finalize(project: Path, root: Path, args) -> None:
+    data = collection(project)
+    if data.get("task_type") == "diagnosis":
+        return
     if not stage_passed(project, "finalized"):
         status = load_json(project / "status.json")
         repo = str(status.get("repo") or project.name.rsplit("__", 1)[0])
@@ -230,6 +286,30 @@ def green_and_finalize(project: Path, root: Path, args) -> None:
                             "--project", project.name, "--date", project.parent.name), cwd=root,
                     timeout=args.timeout)
         mark(project, "finalized")
+
+
+def model_phases(project: Path, root: Path, args) -> None:
+    """Run per-record model phases in order; each model call also takes a global slot."""
+    red(project, root, args)
+    main_trajectory(project, root, args)
+    green(project, root, args)
+
+
+def run_model_phases(projects: list[Path], root: Path, args) -> None:
+    failures = []
+    with ThreadPoolExecutor(max_workers=max(1, args.model_workers), thread_name_prefix="batch-model") as pool:
+        futures = {pool.submit(model_phases, project, root, args): project for project in projects}
+        for future in as_completed(futures):
+            project = futures[future]
+            try:
+                future.result()
+                print(f"PASS {project.name}: model phases")
+            except Exception as exc:
+                failures.append((project, exc))
+                print(f"FAIL {project.name}: {exc}", file=sys.stderr)
+    if failures:
+        names = ", ".join(project.name for project, _ in failures)
+        raise RuntimeError(f"model phases failed for {len(failures)} record(s): {names}")
 
 
 def upload_one(project: Path, root: Path, args) -> None:
@@ -292,6 +372,8 @@ def parse_args():
         command_parser.add_argument("--workers", type=int, default=3)
         command_parser.add_argument("--docker-workers", type=int, default=1)
         command_parser.add_argument("--upload-workers", type=int, default=3)
+        command_parser.add_argument("--model-workers", type=int, choices=(1, 2), default=2,
+                                    help="目标模型并发数；默认 2，设为 1 可恢复串行")
         command_parser.add_argument("--calibration-runs", type=int, default=20)
         command_parser.add_argument("--timeout", type=int, default=3600)
         command_parser.add_argument("--model-timeout", type=int, default=1800)
@@ -327,10 +409,10 @@ def main() -> int:
             reconcile(project)
         for project in projects:
             publish(project, root, args)
+        run_model_phases(projects, root, args)
+        # All records in one repo share the staging Git worktree, so finalize stays serial.
         for project in projects:
-            red(project, root, args)
-            main_trajectory(project, root, args)
-            green_and_finalize(project, root, args)
+            finalize(project, root, args)
         if not args.skip_upload:
             finish(projects, root, args)
         return 0

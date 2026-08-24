@@ -27,8 +27,7 @@ stream-json；stream 捕获另存为 *.stream.jsonl 仅供排查。
   不满足 → 说明该修复轨迹实际无效，回滚重跑第 7 步修复轨迹并重新质检。
   注意：绿灯证明的是测试模型的修复成果，不是 _gold；因此必须在修复轨迹 + 质检之后执行。
 
-串行：red / green / 修复轨迹共用同一把全局锁（~/.codex/go-annotation-pipeline/test_model.lock），
-因为测试模型限流，全流程必须串行。
+限流：red / green / 修复轨迹共用跨进程并发槽位，默认最多同时运行 2 路。
 
 回填：上传后把下面 JSON 写入 collection.json 的 verify_result 字段：
   bugfix    -> {"pre_fix": {...red...}, "post_fix": {...green...}}
@@ -80,15 +79,15 @@ def _default_claude() -> str:
 
 
 def _declared_go(collection: dict, env: Path) -> str:
-    """从 collection.go_version 或 go.mod 取 go 主版本（如 1.22）。"""
+    """从 collection.go_version 或 go.mod 取 Go 版本，保留可选补丁号。"""
     gv = collection.get("go_version") or ""
-    m = re.search(r"go\.mod:\s*go\s+([0-9]+\.[0-9]+)", gv)
+    m = re.search(r"go\.mod:\s*go\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)", gv)
     if m:
         return m.group(1)
     for mod in [env / "go.mod", env / "backend" / "go.mod"]:
         if mod.exists():
             txt = mod.read_text(encoding="utf-8", errors="ignore")
-            m = re.search(r"^go\s+([0-9]+\.[0-9]+)", txt, re.M)
+            m = re.search(r"^go\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)", txt, re.M)
             if m:
                 return m.group(1)
     return ""
@@ -97,7 +96,8 @@ def _declared_go(collection: dict, env: Path) -> str:
 def _go_env(go_version: str) -> dict:
     env = os.environ.copy()
     if go_version:
-        env["GOTOOLCHAIN"] = f"go{go_version}.0"
+        suffix = go_version if go_version.count(".") >= 2 else f"{go_version}.0"
+        env["GOTOOLCHAIN"] = f"go{suffix}"
     return env
 
 
@@ -519,7 +519,7 @@ def cmd_generate(args):
         # 红灯前置于跑轨迹，env 即基线：快照按当前 env 重建，避免重新埋错后用到旧快照。
         print("📸 按当前 env/ 重建埋错基线快照 .base_snapshot（红灯应在跑修复轨迹之前执行，此时 env 即基线）")
         _snapshot_baseline(env_dir, base_snap)
-        with test_model_lock(timeout=lock_timeout):
+        with test_model_lock(timeout=lock_timeout, slots=args.model_slots):
             red_sid = _run_verify_mode("red", base_snap, ev / "red_env", red_out,
                                        verify_cmds, claude_bin, go_env, timeout, proj.name,
                                        evaluator)
@@ -576,7 +576,7 @@ def cmd_generate(args):
         dest = archive_files(proj, prev_green, "green-retry")
         print(f"🗂  已把上一轮绿灯产物归档到: {dest}")
 
-    with test_model_lock(timeout=lock_timeout):
+    with test_model_lock(timeout=lock_timeout, slots=args.model_slots):
         green_sid = _run_verify_mode("green", fixed_env, ev / "green_env", green_out,
                                      verify_cmds, claude_bin, go_env, timeout, proj.name,
                                      evaluator)
@@ -712,7 +712,9 @@ def main():
     c.add_argument("--timeout", type=int, default=1800)
     c.add_argument("--cookie", help="COS 上传 cookie")
     c.add_argument("--skip-upload", action="store_true")
-    c.add_argument("--lock-timeout", type=int, default=0, help="全局串行锁等待秒数；0 表示一直等")
+    c.add_argument("--lock-timeout", type=int, default=0, help="全局模型槽位等待秒数；0 表示一直等")
+    c.add_argument("--model-slots", type=int, choices=(1, 2), default=2,
+                   help="跨批次目标模型最大并发数；默认 2")
     c.set_defaults(func=cmd_generate)
 
     c = sub.add_parser("validate", help="校验已有 verify_result（结构/URL 可访问/session_id 匹配）")
