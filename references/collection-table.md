@@ -47,11 +47,11 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 - 同一个 bug 只能出一个 task_type：bugfix 或 diagnosis 二选一。
 - 交付不再打 zip、不再截图，只提交 GitHub `repo_url` 分支地址。
 
-## BUG_REPRO.md（交付文件，不是收集表字段）
+## 项目类型简介（不是收集表字段）
 
-- 每条记录都要随交付分支提供 `BUG_REPRO.md`（本流程所有题目都是埋好 bug 的项目）。
-- 内容：Bug 是什么、如何触发、错误信息。
-- 只放进 GitHub 交付分支，不放进测试模型的 `env/`。
+- 每条记录必须有 `project_summary.txt`，内容为一句包含 `Go`、明确项目类型和主要功能的简介。
+- 发布时该句写入 `BENZHI_README.md` 第一行；`project_summary.txt` 本身不进入交付分支。
+- 项目与交付分支均不得包含 `BUG_REPRO.md`。
 
 ## 生成脚本要点
 

@@ -93,10 +93,10 @@ def _hash_tree(digest, root: Path, label: str) -> None:
         digest.update(hashlib.sha256(path.read_bytes()).digest())
 
 
-def input_fingerprint(project: Path, root: Path) -> str:
+def input_fingerprint(project: Path, root: Path, *, env_source: Path | None = None) -> str:
     """Hash only preparation inputs; later session/upload fields do not invalidate it."""
     digest = hashlib.sha256()
-    for name in ("prompt.txt", "difficulty_review.json", "contract_coverage.json", "BUG_REPRO.md"):
+    for name in ("prompt.txt", "difficulty_review.json", "contract_coverage.json", "project_summary.txt"):
         path = project / name
         digest.update(f"{name}\0".encode())
         digest.update(hashlib.sha256(path.read_bytes()).digest() if path.exists() else b"missing")
@@ -108,7 +108,7 @@ def input_fingerprint(project: Path, root: Path) -> str:
         )
     }
     digest.update(json.dumps(immutable_fields, ensure_ascii=False, sort_keys=True).encode())
-    _hash_tree(digest, project / "env", "env")
+    _hash_tree(digest, env_source or project / "env", "env")
     _hash_tree(digest, project / "evaluator", "evaluator")
     _hash_tree(digest, root / "_gold" / project.name, "gold")
     return digest.hexdigest()

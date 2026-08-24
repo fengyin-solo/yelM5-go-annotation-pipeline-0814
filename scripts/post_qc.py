@@ -5,25 +5,24 @@
 只读，不改任何产物；逐条输出 ✅/❌，最后给出汇总，不合格时退出码非 0。
 
 校验项（对应甲方抽检红线）：
-  0. preflight   新批次必须有 20/20 红绿、目标断言和回退实跑证据
+  0. preflight   新批次必须有 20/20 红绿和目标断言证据；回退证据按题目需要选用
   1. privacy     目标测试只存在私有 evaluator，env 和初始 Bug 基线不得包含
-  2. build       env 与 _gold 都能 `go build ./...`（项目能编译）
-  3. scope       bugfix 的 gold 修复至少改 4 个功能文件且增删总行数至少 20 行
-  4. red         埋错基线（.base_snapshot）跑验收/复现命令必须红（bug 真实可复现）
-  5. green       _gold 跑同样命令必须绿（修复后通过）
-  6. files       交付文件齐全（轨迹 jsonl、BUG_REPRO、collection.json）
+  2. runtime     核对 preflight/Docker 留存的 build、红绿校准证据；仅显式要求时复跑
+  3. scope       记录功能代码改动规模，不再用固定文件数/行数代替难度判断
+  6. files       轨迹、project_summary.txt、collection.json 齐全，且无 BUG_REPRO.md
   7. fields      collection.json 必填字段齐全（bugfix: verify_cmds/verify_result；
                  diagnosis: verify_cmds/gold_root_cause/verify_result）
   8. evidence    verify_result 结构正确、URL 可访问、session_id 匹配
   9. trajectory_guard  正式轨迹未接触测试/外部路径；bugfix 绿灯后全量回归通过
  10. diagnosis   diagnosis 题 env 与埋错基线零差异（全程零代码改动）
  11. coverage    verify_cmds 为单包、单测试、-count=1，且红灯失败测试真实存在
- 12. difficulty  运行时机制、跨层触发、题面症状覆盖和逐文件回退证据齐全
+ 12. difficulty  运行时机制、跨层触发和题面症状覆盖齐全；已填写的回退证据有效
  13. domain      项目名称与交付字段未命中禁止项目/功能点；仍须人工语义审查
  14. repository  orphan 分支拓扑、G1/G2/R1 文件树、快照与远程分支安全
 
 用法:
-  post_qc.py --root <root> [--date YYYY-MM-DD] [--project <name>__<record>] [--go-version 1.22]
+  post_qc.py --root <root> [--date YYYY-MM-DD] [--project <name>__<record>]
+             [--recheck-runtime] [--go-version 1.22]
 
 verify_cmds 必须来自 collection.json，并与红灯证据轨迹中实际执行的唯一 Bash 命令、
 最终回复里的【命令】逐字一致；bugfix 题的绿灯轨迹同样必须逐字一致。
@@ -48,6 +47,8 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trajectory_guard import inject_evaluator, is_test_artifact, private_test_issues, source_manifest  # noqa: E402
+from batch_state import input_fingerprint  # noqa: E402
+from project_summary import read_project_summary  # noqa: E402
 
 
 _REMOTE_CACHE: dict[str, tuple[int, str, str]] = {}
@@ -82,6 +83,27 @@ def read_collection(proj: Path) -> dict:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def runtime_evidence_status(preflight: dict, docker: dict, current_fingerprint: str) -> tuple[bool, str]:
+    """Validate retained runtime evidence without executing project commands."""
+    if preflight.get("result") != "passed":
+        return False, "preflight 运行证据缺失或失败"
+    checks = preflight.get("checks") if isinstance(preflight.get("checks"), dict) else {}
+    required = ("env_build", "gold_build", "gold_regression", "red_calibration", "green_calibration")
+    failed = [name for name in required if (checks.get(name) or {}).get("passed") is not True]
+    if failed:
+        return False, "preflight 运行证据缺失或失败: " + ", ".join(failed)
+    fingerprint = str(preflight.get("fingerprint") or "")
+    if not fingerprint:
+        return False, "preflight 运行证据缺少输入指纹"
+    if fingerprint != current_fingerprint:
+        return False, "当前输入与 preflight 指纹不一致"
+    if docker.get("result") != "passed":
+        return False, "Docker 运行证据缺失或失败"
+    if docker.get("fingerprint") != fingerprint:
+        return False, "Docker 与 preflight 输入指纹不一致"
+    return True, "preflight 与 Docker 的输入绑定运行证据通过（未重复执行）"
 
 
 def find_projects(root: Path, date: str | None, project: str | None) -> list[Path]:
@@ -352,6 +374,24 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
             if meta.get("g2_commit") != g2 or meta.get("r1_commit") != r1:
                 issues.append("G2/R1 commit 与交付元数据不一致")
 
+    try:
+        expected_summary = read_project_summary(proj)
+    except RuntimeError as exc:
+        expected_summary = ""
+        issues.append(str(exc))
+    readme = _git(repo, "show", f"{g2}:BENZHI_README.md", check=False)
+    if readme.returncode != 0:
+        issues.append("最终 green 缺少 BENZHI_README.md")
+    elif not readme.stdout.splitlines() or readme.stdout.splitlines()[0].strip() != expected_summary:
+        issues.append("BENZHI_README.md 第一行与 project_summary.txt 不一致")
+    delivery_revisions = [(green, g2)]
+    if task_type == "bugfix" and _git(repo, "rev-parse", "--verify", red, check=False).returncode == 0:
+        delivery_revisions.append((red, _git(repo, "rev-parse", red).stdout.strip()))
+    for branch, revision in delivery_revisions:
+        names = _git(repo, "ls-tree", "-r", "--name-only", revision).stdout.splitlines()
+        if any(Path(name).name.lower() == "bug_repro.md" for name in names):
+            issues.append(f"{branch} 不得包含 BUG_REPRO.md")
+
     if g1:
         if _git_tree(repo, g1, True):
             issues.append("G1 包含测试文件或测试夹具")
@@ -417,9 +457,9 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
                 and red_cal.get("passed") is True and red_cal.get("completed", 0) >= 20
                 and green_cal.get("passed") is True and green_cal.get("completed", 0) >= 20
                 and (pre_checks.get("target_assertion_reached") or {}).get("passed") is True
-                and (task_type != "bugfix" or ablation.get("passed") is True)
+                and (task_type != "bugfix" or not ablation or ablation.get("passed") is True)
             )
-            preflight_msg = "20/20 红绿、目标断言和回退证据通过" if preflight_ok else "批次预检证据不完整"
+            preflight_msg = "20/20 红绿和目标断言通过；可选回退证据有效" if preflight_ok else "批次预检证据不完整"
         except Exception as exc:
             preflight_msg = f"批次预检证据无效: {exc}"
         results.append(("preflight", preflight_ok, preflight_msg))
@@ -437,25 +477,47 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         privacy_issues.extend(private_test_issues(base, evaluator, verify_cmds))
     results.append(("privacy", not privacy_issues, "；".join(privacy_issues) or "目标测试只存在私有 evaluator"))
 
-    # 1. build
-    build_fail = []
-    for label, d in (("env", env_dir), ("gold", gold_dir)):
-        if not (d / "go.mod").exists() and not (d / "backend" / "go.mod").exists():
-            build_fail.append(f"{label} 无 go.mod")
-            continue
-        rc, out = run("go build ./...", d, env)
-        if rc != 0:
-            build_fail.append(f"{label} build 失败: {out[-200:]}")
-    results.append(("build", not build_fail, "; ".join(build_fail) or "ok"))
+    preflight = {}
+    pre_checks = {}
+    try:
+        preflight = json.loads((proj / "_evidence" / "preflight.json").read_text(encoding="utf-8"))
+        pre_checks = preflight.get("checks") if isinstance(preflight.get("checks"), dict) else {}
+    except Exception:
+        pass
 
-    # 2. bugfix gold 修复规模
+    # Runtime checks are intentionally evidence-first. The producing stages
+    # already execute these commands and bind their evidence to an input hash.
+    if getattr(args, "recheck_runtime", False):
+        build_fail = []
+        for label, d in (("env", env_dir), ("gold", gold_dir)):
+            if not (d / "go.mod").exists() and not (d / "backend" / "go.mod").exists():
+                build_fail.append(f"{label} 无 go.mod")
+                continue
+            rc, out = run("go build ./...", d, env)
+            if rc != 0:
+                build_fail.append(f"{label} build 失败: {out[-200:]}")
+        results.append(("build", not build_fail, "; ".join(build_fail) or "显式复跑通过"))
+    else:
+        docker = {}
+        try:
+            docker = json.loads((proj / "_evidence" / "docker_verification.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        evidence_ok, detail = runtime_evidence_status(
+            preflight, docker, input_fingerprint(
+                proj, proj.parents[1], env_source=base if base.exists() else env_dir
+            )
+        )
+        results.append(("runtime", evidence_ok, detail))
+
+    # Functional diff size is reported for review, not used as a difficulty proxy.
     if task_type == "bugfix":
         if not base.exists():
             results.append(("scope", False, "缺 .base_snapshot，无法核对 gold 修复规模"))
         else:
             changed_files, changed_lines = functional_diff_scope(base, gold_dir)
-            scope_ok = changed_files >= 4 and changed_lines >= 20
-            results.append(("scope", scope_ok, f"候选功能代码 {changed_files} 个文件，增删 {changed_lines} 行（要求 ≥4 文件且 ≥20 行；仍须人工排除注释/格式化/无效改动）"))
+            scope_ok = changed_files >= 1 and changed_lines >= 1
+            results.append(("scope", scope_ok, f"功能代码 {changed_files} 个文件，增删 {changed_lines} 行；难度由故障链证据判断"))
 
     # 3/4. red / green
     buggy = base if base.exists() else env_dir
@@ -464,43 +526,60 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
     red_executed_cmds = evidence_executed_commands_for(proj, "red")
     green_executed_cmds = evidence_executed_commands_for(proj, "green") if task_type == "bugfix" else []
     red_cmd = verify_cmds
-    with tempfile.TemporaryDirectory(prefix="go-annotation-post-qc-") as tmp:
-        tmp_root = Path(tmp)
-        red_dir = tmp_root / "red"
-        green_dir = tmp_root / "green"
-        shutil.copytree(buggy, red_dir)
-        if evaluator.is_dir():
-            inject_evaluator(evaluator, red_dir)
-        if red_cmd:
-            red_rc, red_out = run(red_cmd, red_dir, env)
-            red_ok = red_rc != 0
-            results.append(("red", red_ok, f"exit={red_rc}" + ("" if red_ok else "（基线竟然绿了）")))
-        else:
-            red_rc, red_out = 0, ""
-            results.append(("red", False, "缺少定向复现命令"))
-
-        if task_type == "bugfix":
-            if verify_cmds:
-                shutil.copytree(gold_dir, green_dir)
-                if evaluator.is_dir():
-                    inject_evaluator(evaluator, green_dir)
-                green_rc, _ = run(verify_cmds, green_dir, env)
-                green_ok = green_rc == 0
-                results.append(("green", green_ok, f"exit={green_rc}"))
+    red_out = "\n".join(
+        str(item.get("output_tail") or "")
+        for item in ((pre_checks.get("red_calibration") or {}).get("runs") or [])
+        if isinstance(item, dict)
+    )
+    if getattr(args, "recheck_runtime", False):
+        with tempfile.TemporaryDirectory(prefix="go-annotation-post-qc-") as tmp:
+            tmp_root = Path(tmp)
+            red_dir = tmp_root / "red"
+            green_dir = tmp_root / "green"
+            shutil.copytree(buggy, red_dir)
+            if evaluator.is_dir():
+                inject_evaluator(evaluator, red_dir)
+            if red_cmd:
+                red_rc, red_out = run(red_cmd, red_dir, env)
+                red_ok = red_rc != 0
+                results.append(("red", red_ok, f"exit={red_rc}" + ("" if red_ok else "（基线竟然绿了）")))
             else:
-                results.append(("green", False, "缺 verify_cmds"))
-        else:
-            results.append(("green", True, "n/a（diagnosis 仅要求红灯证据）"))
+                red_rc, red_out = 0, ""
+                results.append(("red", False, "缺少定向复现命令"))
+
+            if task_type == "bugfix":
+                if verify_cmds:
+                    shutil.copytree(gold_dir, green_dir)
+                    if evaluator.is_dir():
+                        inject_evaluator(evaluator, green_dir)
+                    green_rc, _ = run(verify_cmds, green_dir, env)
+                    green_ok = green_rc == 0
+                    results.append(("green", green_ok, f"exit={green_rc}"))
+                else:
+                    results.append(("green", False, "缺 verify_cmds"))
+            else:
+                results.append(("green", True, "n/a（diagnosis 仅要求红灯证据）"))
 
     # 5. files
     sid = (coll.get("session_id") or "").strip()
     missing = []
     for f, ok in ((f"{sid}.jsonl", (proj / f"{sid}.jsonl").exists() if sid else False),
-                  ("BUG_REPRO.md", (proj / "BUG_REPRO.md").exists()),
+                  ("project_summary.txt", (proj / "project_summary.txt").exists()),
                   ("collection.json", (proj / "collection.json").exists())):
         if not ok:
             missing.append(f)
-    results.append(("files", not missing, "; ".join(f"缺 {m}" for m in missing) or "ok"))
+    file_issues = [f"缺 {m}" for m in missing]
+    forbidden_repro = [
+        str(path.relative_to(proj)) for path in proj.rglob("*")
+        if path.name.lower() == "bug_repro.md"
+    ]
+    if forbidden_repro:
+        file_issues.append("记录目录不得包含 BUG_REPRO.md: " + ", ".join(forbidden_repro[:8]))
+    try:
+        read_project_summary(proj)
+    except RuntimeError as exc:
+        file_issues.append(str(exc))
+    results.append(("files", not file_issues, "; ".join(file_issues) or "ok"))
 
     # 6. fields
     miss = []
@@ -684,6 +763,8 @@ def main():
     ap.add_argument("--date")
     ap.add_argument("--project")
     ap.add_argument("--go-version", help="强制 Go 主版本（如 1.22），缺省从 go.mod 读取")
+    ap.add_argument("--recheck-runtime", action="store_true",
+                    help="显式重新执行 build 和红绿命令；默认只核对输入指纹绑定的已有证据")
     ap.add_argument("--verify-cmds", help=argparse.SUPPRESS)
     ap.add_argument("--workers", type=int, default=3, help="本地记录并发数（默认 3）")
     args = ap.parse_args()

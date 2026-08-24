@@ -11,6 +11,35 @@ from verify_cmds import validate_success_criteria  # noqa: E402
 
 
 class PostQCTest(unittest.TestCase):
+    def test_read_collection_returns_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / "collection.json").write_text('{"task_type":"bugfix"}', encoding="utf-8")
+            self.assertEqual({"task_type": "bugfix"}, post_qc.read_collection(project))
+
+    def test_runtime_evidence_requires_matching_input_fingerprint(self):
+        checks = {
+            name: {"passed": True}
+            for name in ("env_build", "gold_build", "gold_regression", "red_calibration", "green_calibration")
+        }
+        preflight = {"result": "passed", "fingerprint": "input-v1", "checks": checks}
+        self.assertEqual(
+            (True, "preflight 与 Docker 的输入绑定运行证据通过（未重复执行）"),
+            post_qc.runtime_evidence_status(
+                preflight, {"result": "passed", "fingerprint": "input-v1"}, "input-v1"
+            ),
+        )
+        ok, message = post_qc.runtime_evidence_status(
+            preflight, {"result": "passed", "fingerprint": "input-v2"}, "input-v1"
+        )
+        self.assertFalse(ok)
+        self.assertIn("指纹不一致", message)
+        ok, message = post_qc.runtime_evidence_status(
+            preflight, {"result": "passed", "fingerprint": "input-v1"}, "input-v2"
+        )
+        self.assertFalse(ok)
+        self.assertIn("当前输入", message)
+
     def test_patch_go_version_is_preserved_for_toolchain(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

@@ -317,7 +317,7 @@ def archive_previous_round(project_dir: Path, reason: str = "rerun") -> Path | N
     归档：上一轮主轨迹（<uuid>.jsonl / <uuid>.stream.jsonl）、trajectory.* 临时/失败/日志文件、
     绿灯产物（verify_green*，上一轮修复对应的绿灯已随轨迹一起作废）。
     保留：红灯证据（verify_red*、red_result.json，基线未变仍然有效）、基线快照、
-    prompt.txt、collection.json、BUG_REPRO.md。
+    prompt.txt、collection.json、project_summary.txt。
     """
     if not project_dir.exists():
         return None

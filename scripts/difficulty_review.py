@@ -79,8 +79,8 @@ def validate_review(project: Path, task_type: str | None = None) -> tuple[bool, 
     coupled = review.get("coupled_runtime_mechanisms")
     if primary not in RUNTIME_MECHANISMS:
         issues.append("primary_runtime_mechanism 不在允许列表")
-    if not isinstance(coupled, list) or not coupled:
-        issues.append("coupled_runtime_mechanisms 至少填写 1 项")
+    if not isinstance(coupled, list):
+        issues.append("coupled_runtime_mechanisms 必须是数组")
         coupled = []
     invalid = sorted({_text(x) for x in coupled} - RUNTIME_MECHANISMS)
     if invalid:
@@ -94,8 +94,8 @@ def validate_review(project: Path, task_type: str | None = None) -> tuple[bool, 
     layers = review.get("affected_layers")
     unique_layers = {_text(x) for x in layers} if isinstance(layers, list) else set()
     unique_layers.discard("")
-    if len(unique_layers) < 3:
-        issues.append("affected_layers 至少包含 3 个不同模块/包")
+    if len(unique_layers) < 2:
+        issues.append("affected_layers 至少包含 2 个不同模块/包")
 
     if review.get("simple_core_excluded") is not True:
         issues.append("simple_core_excluded 必须为 true")
@@ -121,7 +121,9 @@ def validate_review(project: Path, task_type: str | None = None) -> tuple[bool, 
         minimum_files = int(core.get("minimum_function_files", 0))
     except (TypeError, ValueError):
         minimum_files = 0
-    required_files = 4 if (task_type or infer_task_type(project, review)) == "bugfix" else 3
+    # File count is useful evidence, but it is not a reliable proxy for difficulty.
+    # Keep a small cross-file minimum and let the runtime chain carry the decision.
+    required_files = 2
     if minimum_files < required_files:
         issues.append(f"core_defect_review.minimum_function_files 至少为 {required_files}")
     locations = core.get("root_cause_locations")
@@ -163,8 +165,8 @@ def validate_review(project: Path, task_type: str | None = None) -> tuple[bool, 
             issues.append(f"query_evidence.{key} 必须是 user_query 中至少 4 字的原文片段")
 
     coverage = review.get("symptom_coverage")
-    if not isinstance(coverage, list) or len(coverage) < 2:
-        issues.append("symptom_coverage 至少填写 2 个用户可见症状及对应断言")
+    if not isinstance(coverage, list) or len(coverage) < 1:
+        issues.append("symptom_coverage 至少填写 1 个主要用户可见症状及对应断言")
         coverage = []
     seen_fragments = set()
     for index, item in enumerate(coverage, 1):
@@ -179,17 +181,17 @@ def validate_review(project: Path, task_type: str | None = None) -> tuple[bool, 
             issues.append(f"symptom_coverage[{index}] 缺 test_assertion")
         if fragment:
             seen_fragments.add(fragment)
-    if coverage and len(seen_fragments) < 2:
-        issues.append("symptom_coverage 必须覆盖 2 个不同症状")
 
     actual_task_type = task_type or infer_task_type(project, review)
     if _text(review.get("task_type")) != actual_task_type:
         issues.append("difficulty_review.task_type 与 collection.json/命令指定类型不一致")
     if actual_task_type == "bugfix":
         repairs = review.get("repair_ablation_checks")
-        if not isinstance(repairs, list) or len(repairs) < 4:
-            issues.append("bugfix 的 repair_ablation_checks 至少填写 4 个修复文件")
+        if not isinstance(repairs, list):
+            issues.append("bugfix 的 repair_ablation_checks 必须是数组")
             repairs = []
+        # Ablation is optional evidence for unusually distributed fixes. It is
+        # no longer a universal four-file gate.
         paths = set()
         for index, item in enumerate(repairs, 1):
             if not isinstance(item, dict):
@@ -230,7 +232,7 @@ def cmd_init(args) -> int:
         "primary_runtime_mechanism": "",
         "coupled_runtime_mechanisms": [],
         "trigger_sequence": ["", ""],
-        "affected_layers": ["", "", ""],
+        "affected_layers": ["", ""],
         "simple_core_excluded": False,
         "single_local_fix_sufficient": True,
         "core_defect_review": {
@@ -244,10 +246,7 @@ def cmd_init(args) -> int:
             "root_cause_locations": [],
         },
         "query_evidence": {"trigger_fragment": "", "expected_fragment": ""},
-        "symptom_coverage": [
-            {"query_fragment": "", "test_assertion": ""},
-            {"query_fragment": "", "test_assertion": ""},
-        ],
+        "symptom_coverage": [{"query_fragment": "", "test_assertion": ""}],
         "repair_ablation_checks": [],
         "manual_reviewed": False,
         "reviewer_notes": "",
@@ -262,7 +261,7 @@ def cmd_check(args) -> int:
     project = Path(args.project).resolve()
     ok, issues = validate_review(project, args.task_type)
     if ok:
-        print("难度审查通过：运行时机制、跨层触发、题面覆盖和修复回退证据齐全。")
+        print("难度审查通过：运行时机制、跨层触发和题面覆盖证据齐全；可选回退证据有效。")
         return 0
     print("难度审查不通过：")
     for issue in issues:

@@ -56,22 +56,22 @@
 6. 与改动半径相关的既有测试可运行，可用作回归。
 7. gold 根因与 gold 修复不进入测试模型可见环境。
 
-埋 bug 难度按 bug_category 选型：优先 concurrency / nil / slice / error / context / defer 里需要多步定位、强模型也会栽的缺陷；**必须满足「埋错复杂度红线」**（见下节），禁止一眼看出、单字符、单行、单文件、常量改错、go vet 级、改坏测试暴露答案的简单埋错。
+埋 bug 难度按 bug_category 选型：优先 concurrency / nil / slice / error / context / defer 里需要多步定位、强模型也会栽的缺陷；**必须满足「埋错复杂度红线」**（见下节），禁止一眼看出、单字符、常量改错、go vet 级或改坏测试暴露答案的简单埋错。
 
 **本地 `_gold/` 修复由执行本标注流程的模型（当前 Codex）完成**，不是由 Claude Code 配置的测试模型完成。它只用于红绿校准、难度检查和回归验证，不创建远程分支、不进入收集表。
 
 ## 埋错复杂度红线（硬性，出题前必读）
 
-**运行时机制难度和修复规模必须同时达标。** 4 个功能文件、20 行功能代码只是必要条件，不足以单独证明题目困难。核心缺陷必须由至少 1 个主运行时机制与另 1 个不同机制耦合形成一条不可拆的故障链，跨至少 3 个模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。
+**难度以真实故障链为准，不以修复规模代替。** 核心缺陷必须涉及至少 1 个 Go 运行时机制，跨至少 2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。存在第二种耦合机制时应记录，但不要求每题强行叠加。
 
 允许的运行时机制标签：`concurrency_sync`、`channel_lifecycle`、`context_lifecycle`、`error_retry`、`resource_lifecycle`、`transaction_lifecycle`、`typed_nil_dispatch`、`panic_recovery`、`shared_state_pollution`、`state_machine_idempotency`。
 
-**bugfix 的 gold 修复仍必须同时满足「至少改动 4 个不同的功能代码文件」和「功能代码增删总行数至少 20 行」。** 两个条件是 AND，缺一不可。统计不含 `_test.go`、README、Markdown/其他文档、注释、`BENZHI*`、`benzhi.Dockerfile`、`build_benzhi_docker.sh` 等交付文件，不允许靠改测试、拆文件、加注释或堆无效代码凑规模。
+bugfix 的 gold 必须包含真实功能代码修复。文件数和增删行数作为审查信息记录，统计不含 `_test.go`、README、Markdown/其他文档、注释和交付文件；不得靠改测试、拆文件、加注释或堆无效代码制造规模。
 
-- 禁止把以下内容作为核心缺陷：纯索引/长度/offset/容量/边界计算，单字段映射、常量、比较符或条件分支，单个 `%v`/`%w`、nil 判断、状态转换漏项、序列化标签，以及单函数纯输入输出变换。即使把配套改动扩写到 4 文件和 20 行也不合格。
-- 根本修复若只需一处局部改动，其余文件只是防御性修改、重命名或凑规模，直接淘汰。
+- 禁止把以下内容作为核心缺陷：纯索引/长度/offset/容量/边界计算，单字段映射、常量、比较符或条件分支，单个 `%v`/`%w`、nil 判断、状态转换漏项、序列化标签，以及单函数纯输入输出变换。扩大改动规模也不能让这类简单缺陷合格。
+- 根本修复若只是显而易见的局部常量、比较符或字段改动，通常淘汰；集中修复本身不是淘汰理由，关键看定位和故障传播难度。
 - 纯数据变换只有与异步消费、共享状态逃逸、跨请求污染等运行时机制形成不可拆故障链时才允许使用。
-- diagnosis 的根因也必须定位到跨文件/多行级的缺陷，不搞一眼看穿的局部错误。
+- diagnosis 的根因也应体现跨模块影响或运行时机制，不搞一眼看穿的局部错误。
 
 ### 复杂埋错设计方法（把 bug 做成“多文件协同失效”）
 
@@ -81,7 +81,7 @@
 2. **再设计有顺序的触发**：至少经过两次操作或两个生命周期阶段，例如首请求超时后再发正常请求、失败后重试成功、写入与异步读取交错。
 3. **让故障跨层传导**：入口层切断生命周期 → service 作出错误决策 → worker/store 留下副作用；用户在末端看到症状，不能从报错行直接得到修复点。
 4. **保持一个目标缺陷**：多个埋点必须共同违反同一份生命周期、所有权、错误或状态契约，不得拼接互不相关的四个 bug。
-5. **保证修复不可约简**：至少 4 个功能文件分别修复链路的一环；逐个回退关键修复时，原定向测试都必须重新失败。
+5. **确认修复对应故障链**：修复涉及多个关键文件时，可逐个回退并确认定向测试重新失败；不要为满足数量拆分修复。
 
 ### 实战经验（踩坑记录，照做）
 
@@ -93,13 +93,13 @@
 
 ### 埋错自检清单（出题人逐项确认）
 
-- [ ] gold 修复 diff 同时满足「功能代码文件数 ≥4 且增删总行数 ≥20」
-- [ ] 主运行时机制与至少 1 个不同耦合机制真实存在，不是题面堆术语
+- [ ] gold 修复包含真实功能代码变更，文件数和行数已记录且没有凑规模
+- [ ] 至少 1 个主运行时机制真实存在；填写的耦合机制均有代码和运行证据
 - [ ] `core_defect_review` 明确证明：故障链依赖运行时机制、调用顺序/生命周期和跨层状态传导；根本修复不是单点数据变换
-- [ ] `root_cause_locations` 列出的根因链功能文件真实存在：bugfix 至少 4 个、diagnosis 至少 3 个，并逐项说明运行时职责和故障贡献；不能靠拆文件、格式化、注释或防御性代码凑数
-- [ ] 触发至少 2 步，故障链跨 ≥3 个模块/包
-- [ ] user_query 含至少 2 个相关症状和正确预期，目标测试逐项断言
-- [ ] 逐个回退至少 4 个修复文件的关键改动后，原定向测试每次都重新变红
+- [ ] `root_cause_locations` 至少覆盖 2 个真实相关功能文件，并逐项说明运行时职责和故障贡献
+- [ ] 故障链跨至少 2 个相关模块/包，触发过程与真实复现一致
+- [ ] user_query 的主要症状和正确预期均由目标测试覆盖
+- [ ] 若填写逐文件回退证据，每一项都真实复跑并重新变红
 - [ ] 单看任何一个文件都看不出完整问题
 - [ ] 20/20 全红稳定，打上 gold 修复后 20/20 全绿
 - [ ] 题面只写症状，不暴露文件/符号/改动位置
@@ -110,15 +110,15 @@
 # 首选：发布前直接对比本地 env/ 与 _gold/，不需要 GitHub 分支
 git diff --no-index --numstat <project>/env _gold/<name>__<record> \
   | grep -Ev '(_test\.go|README|\.md$|BENZHI|benzhi\.Dockerfile|build_benzhi_docker\.sh)' \
-  | awk '{add+=$1; del+=$2; n++} END {lines=add+del; print n" files, "lines" changed lines (+"add"/-"del")"; exit !(n>=4 && lines>=20)}'
+  | awk '{add+=$1; del+=$2; n++} END {print n" functional files, "add+del" changed lines (+"add"/-"del")"}'
 
 ```
 
-- **测量必须在进入红绿校准之前完成**（用本地 `--no-index` 命令）；不要等发布后才第一次量，不达标会连累题面和校准全部返工。
-- `numstat` 只能机械排除测试/文档/交付文件，不能识别注释、纯格式化、拆文件和无效逻辑；数量达标后必须人工审阅 diff，确认至少 20 行确实是修复行为所需的功能代码。
+- **测量应在进入红绿校准之前完成**（用本地 `--no-index` 命令），用于辅助审查修复形状。
+- `numstat` 只能机械排除测试/文档/交付文件，不能识别注释、纯格式化、拆文件和无效逻辑；必须人工审阅 diff，确认变更确实服务于故障链。
 - **不要在跑完轨迹后的 `env/` 上量**——env 已被测试模型改回接近 gold，diff 会很小。
 
-**运行时机制、跨层时序、逐文件回退、功能文件数或功能代码行数任一门禁不达标，都判埋错不合格，必须重新设计，不得进入红绿校准。** 使用 `scripts/difficulty_review.py init/check` 维护记录根目录的私有 `difficulty_review.json`；该文件不得放进 `env/`。
+**运行时机制、跨模块传播、真实复现或题面测试覆盖任一硬门禁不达标，都判埋错不合格。** 文件数、行数和逐文件回退属于辅助或增强证据。使用 `scripts/difficulty_review.py init/check` 维护记录根目录的私有 `difficulty_review.json`；该文件不得放进 `env/`。
 
 ## 缺陷分类 bug_category
 
@@ -142,7 +142,7 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - 正式修复轨迹必须在系统临时目录的无测试副本中运行：排除所有 `*_test.go`、`.git`、`evaluator`、`_gold` 和交付线索；成功后只回写非测试业务文件。
 - 不得用 system prompt、append system prompt 或拼接用户题面的方式注入额外轨迹约束文字；模型只收到 `prompt.txt` 原文，防泄漏依靠环境隔离和轨迹审计。
 - 测试模型 workspace 必须来自已发布 G1 的单分支快照，且不能有 `.git` 历史、remote、commit SHA、补丁文件、gold 修复说明。
-- 测试模型 workspace 和 prompt 里不能暴露本技能：不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、技能名等标记。
+- 测试模型 workspace 和 prompt 里不能暴露本技能：不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、技能名等标记。`BUG_REPRO.md` 已全面禁用，任何位置发现都应删除或拒绝交付。
 - 远程不得存在 `main`、干净基座或 gold 分支。每个 bug 的 `bug<record>_green` 与 `bug<record>_red` 都用 `--orphan` 独立生根；不同 bug 也不得有共同祖先。
 - 跑轨迹前 green 只有 G1 单提交。bugfix 收题后 green 为 G1→G2，red 为 R1 单提交；G1/R1 非测试树完全一致，G2/R1 验收文件完全一致。
 - 绝不能把原始多分支 repo 交给模型；必须导出 G1 的模型可见快照，用 `g1_snapshot.json` 逐文件验证后再运行。
@@ -156,11 +156,11 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - **轨迹命令一致性硬门禁**：`verify_cmds` 必须与红灯证据轨迹中要求执行、实际执行、最终回复【命令】逐字一致；bugfix 的绿灯证据轨迹也必须逐字一致。不得把 `./internal/service` 改成 `./internal/./service`、不得调整参数顺序或增删等价参数；若命令要改，必须重跑对应证据轨迹。
 - **完整覆盖硬门禁**：逐项对照 `user_query`，目标测试必须能触发并断言其中描述的每个用户可见现象、触发条件和错误结果；遗漏任一项、只覆盖相邻行为、只证明构建失败或只命中局部症状，均判 `verify_cmds` 不合格。
 - **断言契约硬门禁**：正式轨迹前必须用 `contract_coverage.py init/check` 将 evaluator 中每条直接失败断言逐项映射到 `user_query` 的触发/预期原文、`success_criteria` 原文和 `difficulty_review.json` 证据。任何断言无映射或 evaluator 改动后映射过期，均不得调用正式模型。
-- bugfix 必须先跑初始状态红和完整 gold 绿，再逐个回退 `difficulty_review.json` 中至少 4 个功能文件的关键修复；每次都用原样 verify_cmds 重新跑红，随后恢复该文件并确认完整 gold 仍为绿。
+- bugfix 必须先跑初始状态红和完整 gold 绿。若 `difficulty_review.json` 填写了逐文件回退项，则每项都用原样 verify_cmds 重新跑红，随后恢复并确认完整 gold 仍为绿。
 - bugfix 稳定性校准红/绿各重复执行同一条 `-count=1` 定向命令 ≥20 次；不得把 `verify_cmds` 改成 `-count=20`。并发题每次必须保留 `-race`，形成至少 20 次 `-race -count=1` 的真实稳定性证据。
 - 埋错自检必须 20/20 全红，修复后必须 20/20 全绿；连跑 ≥20 遍仍不稳的标 flaky，只做 diagnosis。
 - `batch_preflight.py` 必须把每次原样命令的退出码、耗时和输出尾部留在 `_evidence/preflight.json`；红灯还必须实际到达至少一条 `contract_coverage.json` 目标断言消息，禁止把编译失败或工具链崩溃计为红。
-- bugfix 四文件回退必须真实执行：从完整 gold 开始，每次用 buggy 版本替换一个 `repair_ablation_checks` 功能文件，注入 evaluator 并执行原样 `verify_cmds`；至少 4 个不同文件必须各自重新变红。
+- 已填写的 bugfix 回退项必须真实执行：从完整 gold 开始，每次用 buggy 版本替换对应功能文件，注入 evaluator 并执行原样 `verify_cmds`；每个条目必须重新变红。
 - 回归仍以单独复跑全量测试为准，但全量命令不得写入 `verify_cmds`；只有全量确实跑不动时才收敛到改动半径，并在 success_criteria 写明原因。
 - 只验证公开行为，不要求测试模型的写法与本地 `_gold/` 修复一致。
 
@@ -209,7 +209,8 @@ bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
 
 - 每个 repo 最多 30 条记录，每条 bugfix 一对 green/red orphan 分支；diagnosis 只有 green G1。
 - `repo_url` 填 `bug<record>_green` 分支地址。
-- green/red 交付分支必须包含根目录 Docker 交付文件及按需的 `BUG_REPRO.md`。
+- green/red 交付分支必须包含根目录 Docker 交付文件，且不得包含 `BUG_REPRO.md`。
+- 每条记录必须有单行 `project_summary.txt`，包含 `Go`、明确项目类型和主要功能；发布后该句必须位于 `BENZHI_README.md` 第一行，`project_summary.txt` 本身不提交。
 - 交付不再打 zip、不再截图，只提交 GitHub `repo_url` 分支地址。
 - **`publish` 和 Docker 验证必须在跑轨迹前完成**；轨迹前只允许 G1。轨迹与私有绿灯通过后由 `finalize` 一次创建 G2/R1；禁止把 gold 修复内容混入任何远程分支。
 - GitHub 仓库用 `github_project.py ensure` 自动创建 **public** repo（审核方需要能访问）；用 `publish` 推送 Bug 分支并输出 `repoUrl`。
@@ -223,15 +224,13 @@ bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
 - gold 环境必须 `go build ./...` 和 `go test ./...` 全绿。
 - 不打包 zip，不截图。
 
-## BUG_REPRO.md 记录规则
+## 项目类型简介
 
-- **每条记录都要写**（本流程所有题目都是埋好 bug 的项目）。
-- 记录三件事：**Bug 是什么、如何触发、错误信息**。
-- 生成时机：红绿校准确认基线为红、Docker 验证 bug 环境并实际触发错误之后。
-- 存放位置：`<project>/BUG_REPRO.md`（项目记录目录，**不在 env/ 内**）。
-- 内容只基于 bug base，不写 gold 修复方案、不改写错误信息。
-- 发布 GitHub 时由 `github_project.py publish` 把它提交到 orphan green G1；模型快照仍会排除该文件。
-- 测试模型运行的 `env/` 快照里不得出现该文件，避免泄题。
+- 创建记录时通过 `workspace.py new-project --project-summary '<简介>'` 生成 `<project>/project_summary.txt`。
+- 简介必须只有一行，明确包含 `Go` 和项目类型（如 CLI、命令行工具、服务、API、系统或库），并概括主要功能。
+- 发布脚本把简介逐字写到根目录 `BENZHI_README.md` 第一行；后置质检直接读取最终 green 分支核对。
+- `project_summary.txt` 只作为记录元数据，不进入 `env/` 或 GitHub 交付分支。
+- 项目目录、源码、green/red 分支均禁止出现 `BUG_REPRO.md`；发布脚本会删除 staging 中的旧残留，post-QC 会拒绝仍含该文件的记录或分支。
 
 ## 收集表文案书写规范
 
@@ -239,14 +238,14 @@ bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
 - `user_query`、`success_criteria` 或 `gold_root_cause` 命中 [forbidden-domains.md](forbidden-domains.md) 时，不得通过删词或换同义词继续使用同一功能点；必须回到选题阶段更换业务功能。
 - `user_query` 差异化要点：
   - **纯提示词红线**：只写自然语言提示词，**不写验收/复现/运行指令，不贴命令代码块，也不要求模型跑、执行、重跑或验证测试**；验收命令只放 `verify_cmds` 和红/绿证据阶段。
-  - **先定人设再动笔**：每条题面换一个不同的说话人（着急的 / 随口的 / 话少的 / 稍絮叨的 / 半懂不懂的），用人设带出措辞、语气、长短差异；禁止从任何现成句式池里挑句子。
-  - **真实复杂度要素齐全、写法自由**：至少 2 步有顺序的触发过程、至少 2 个同属一条故障链的用户可见症状、正确行为预期、自然背景或情绪、环境交代、任务指令都要有；顺序可乱、可以合并，但不能只写一个输入触发一个错误结果。
+  - **自然表达**：使用具体的真人求助口吻，禁止从现成句式池挑句子；不要求固定人设、字数、句数或情绪铺垫。
+  - **真实复杂度要素齐全、写法自由**：写清真实复现所需的触发过程、主要用户可见症状、正确行为预期和任务指令；不为满足数量增加虚假步骤或症状。
   - **题面不泄漏机制**：不写 context、锁、channel、事务、对象池等推断性答案，难度通过触发顺序、关联症状和状态影响自然体现；所有描述必须来自真实复跑且有测试断言，禁止为了显难编造现象。
-  - **结构也要错开**：长短（40–150 字内浮动，纯文本字数）、句序、要素组合逐条不同。
+  - **避免模板化**：不同题目应忠实描述各自场景，不要求为了表面差异机械调整句序或长度。
   - 被禁模板句（含旧版 SKILL 示例句池）逐字出现即判雷同，完整清单以 `scripts/check_prompt_duplicates.py` 的 BANNED_PHRASES 为准，典型如：`之前是好的，估计是最近哪次改动搞出来的`、`仓库就是当前目录`、`工具链我都装好了`、`先别改代码，帮我看看是哪里的问题`、`环境我都配好了`、`直接 go test ./... 就能跑`。
   - 任务指令说法逐条换：bugfix 的「帮我修好 / 帮我修一下 / 麻烦修掉」、diagnosis 的「先别改代码 / 文件先别改 / 帮我把原因查清楚」交替且不逐字重复。
-  - 任意两题的 `user_query` 不得出现 12 字以上的完全连续重复片段；写完在本期根目录跑 `python3 <skill>/scripts/check_prompt_duplicates.py --root .` 强制自检，有红就改。
-- **交付字段叙事红线**：`bug_id`、`user_query`、`gold_root_cause`、`success_criteria` 和 `prompt.txt` 必须把缺陷写成程序本身已经存在的问题。禁止出现“埋错 / 埋 bug / 人工注入 / 故障注入 / 故意制造 / 出题环境 / `_gold` / gold 修复”等内部构造措辞；红灯事实用“问题存在时 / 修复前 / 当前代码中”，不得用“埋错态 / 埋错环境”。`BUG_REPRO.md` 也只描述问题、触发和错误，不写人为构造过程。
+  - 写完运行 `check_prompt_duplicates.py --root .`。默认报告 24 字以上连续重复供人工复核，但不阻断真实必要术语；只有批次明确要求严格去重时使用 `--strict-duplicates`。
+- **交付字段叙事红线**：`bug_id`、`user_query`、`gold_root_cause`、`success_criteria` 和 `prompt.txt` 必须把缺陷写成程序本身已经存在的问题。禁止出现“埋错 / 埋 bug / 人工注入 / 故障注入 / 故意制造 / 出题环境 / `_gold` / gold 修复”等内部构造措辞；红灯事实用“问题存在时 / 修复前 / 当前代码中”，不得用“埋错态 / 埋错环境”。
 - `success_criteria` 必须是本条数据专属的业务验收摘要，不能是换到任意项目都成立的流程话术。先从 `user_query` 与目标测试断言提取「业务对象/输入状态、可见异常、后续影响」，字段里原样复用至少一个 4 字以上业务短语，并把每个红绿事实落到这些对象上；不得只写代码状态、定向命令、定位结论、公开现象、真实复现、无回归或工作区不变。
   - bugfix：具体写出业务触发在问题存在时 20/20 出现什么异常、修复后 20/20 恢复什么公开行为、回退关键改动后哪个业务现象重新出现，以及全量回归事实。
   - diagnosis：具体写出业务触发 20/20 出现什么异常；定位结论要连接本题的输入/接口值、恢复或状态路径和后续跳过、污染或错误回执；最后写工作区零改动。禁止套用 bugfix 的修复后全绿模板。

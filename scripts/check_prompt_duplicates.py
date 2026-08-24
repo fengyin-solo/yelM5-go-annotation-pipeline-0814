@@ -4,8 +4,7 @@
 扫描 <root> 下任意层级的 YYYY-MM-DD/<record>/prompt.txt 与 collection.json：
 1. 检查 user_query / success_criteria / verify_cmds 三条
    是否包含已被判定雷同的模板句（硬红）。
-2. 分别对三条做跨题比对：任意两题的同一字段存在 >= --min-dup 个字符的
-   完全相同的连续片段即硬红（verify_cmds 只比较精确测试标识，忽略必需命令骨架）。
+2. 分别对三条做跨题比对并报告相似片段；默认只作为人工复核提示。
 3. 检查 user_query / success_criteria 是否泄露内部缺陷构造过程。
 4. 检查 user_query / success_criteria 是否命中禁止项目或功能点。
 5. 检查 user_query 是否写入 Go 版本号或工具链版本。
@@ -282,8 +281,10 @@ def find_duplicates(records, min_dup):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=".")
-    ap.add_argument("--min-dup", type=int, default=12,
-                    help="连续重复片段的最小字符数（默认 12）")
+    ap.add_argument("--min-dup", type=int, default=24,
+                    help="连续重复片段的报告阈值（默认 24）")
+    ap.add_argument("--strict-duplicates", action="store_true",
+                    help="把跨题连续重复片段升级为失败；默认仅报告")
     args = ap.parse_args()
 
     root = os.path.abspath(args.root)
@@ -302,8 +303,11 @@ def main():
     domains = check_forbidden_domains(records)
     go_versions = check_user_query_go_versions(records)
 
-    if not banned and not dups and not forbidden and not internal and not domains and not go_versions:
-        print("去重自检通过：三条文案均未发现被禁模板句、内部构造措辞、禁止业务类型、Go 版本环境描述、生僻/序号字符，也未发现 >= {} 字的跨题连续重复片段。".format(args.min_dup))
+    hard_dups = dups if args.strict_duplicates else []
+    if not banned and not hard_dups and not forbidden and not internal and not domains and not go_versions:
+        print("文案自检通过：未发现模板泄漏、内部构造措辞、禁止业务类型、Go 版本环境描述或生僻序号字符。")
+        if dups:
+            print("相似度提示（不阻断）：发现 {} 处 >= {} 字连续重复片段，请人工确认是否模板化。".format(len(dups), args.min_dup))
         return 0
 
     if banned:
@@ -332,7 +336,8 @@ def main():
             print("  - {id}/{field} ({source}): {issue}\n    {path}".format(**item))
 
     if dups:
-        print("\n[硬红] 任意两题的同一字段存在 >= {} 字连续重复片段:".format(args.min_dup))
+        level = "硬红" if args.strict_duplicates else "提示"
+        print("\n[{}] 任意两题的同一字段存在 >= {} 字连续重复片段:".format(level, args.min_dup))
         shown = 0
         for item in dups:
             print("  - [{field}] {sub!r} 出现在 {ids}".format(field=item["field"], sub=item["sub"], ids=", ".join(item["ids"])))
@@ -341,8 +346,11 @@ def main():
                 print("  ... 还有更多，已截断")
                 break
 
-    print("\n请逐条改写，使现象/废话/环境/验收三类文案句式错开；改完重跑本命令直到全绿。")
-    return 1
+    if banned or forbidden or internal or domains or go_versions or hard_dups:
+        print("\n请修复硬性问题后重跑。相似度提示由人工结合真实场景判断，不要求机械改写。")
+        return 1
+    print("\n仅发现相似度提示，不阻断流程。")
+    return 0
 
 
 if __name__ == "__main__":

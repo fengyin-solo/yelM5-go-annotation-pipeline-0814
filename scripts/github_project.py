@@ -45,9 +45,21 @@ from trajectory_guard import (  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_docker import make_dockerfile, detect_go_version, find_go_mod  # noqa: E402
 from domain_guard import validate_project_domain  # noqa: E402
+from project_summary import read_project_summary, validate_project_summary  # noqa: E402
+from resource_lock import lock_name, resource_lock  # noqa: E402
 
 DEFAULT_CONTEXT = Path.home() / ".codex" / "pg-code" / "github-context.json"
 DEFAULT_REMOTE = "origin"
+
+
+def repo_write_lock(root: Path, repo_name: str):
+    base = slugify(repo_name)
+    resolved_name = resolve_repo_name(root, base) or base
+    key = str((root / "_repos" / resolved_name).resolve())
+    return resource_lock(
+        root / "_locks" / "repos" / lock_name(key),
+        label=f"staging Git 仓库 {resolved_name}",
+    )
 
 
 def run_git(repo: Path, *args: str, env: dict[str, str] | None = None, check: bool = True):
@@ -159,6 +171,7 @@ def sync_bug_source(src: Path, dst: Path) -> None:
         "--exclude=node_modules", "--exclude=dist", "--exclude=build",
         "--exclude=*.log", "--exclude=*.jsonl", "--exclude=.env", "--exclude=.env.*",
         "--exclude=.DS_Store", "--exclude=SOURCE.txt", "--exclude=*.source.txt",
+        "--exclude=BUG_REPRO.md", "--exclude=project_summary.txt",
         str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/",
     ], capture_output=True, text=True)
     if r.returncode != 0:
@@ -251,10 +264,12 @@ echo "📋 进入容器: docker run -it $IMAGE_NAME bash"
 """
 
 
-def make_readme(project: str, go_version: str, module_rel: Path) -> str:
+def make_readme(project: str, project_summary: str, go_version: str, module_rel: Path) -> str:
     module_dir = "." if module_rel == Path(".") else module_rel.as_posix()
     container_workdir = "/app" if module_dir == "." else f"/app/{module_dir}"
-    return f"""# {project}
+    return f"""{project_summary}
+
+# {project}
 
 ## 构建镜像
 
@@ -302,21 +317,30 @@ def _assert_root_delivery_files(repo: Path) -> None:
         for candidate in repo.rglob(name)
         if candidate.parent != repo and ".git" not in candidate.parts
     ]
-    if missing or nested:
+    forbidden_repro = [
+        str(path.relative_to(repo)) for path in repo.rglob("*")
+        if ".git" not in path.parts and path.name.lower() == "bug_repro.md"
+    ]
+    if missing or nested or forbidden_repro:
         parts = []
         if missing:
             parts.append("根目录缺少: " + ", ".join(missing))
         if nested:
             parts.append("子目录存在违规副本: " + ", ".join(sorted(nested)))
+        if forbidden_repro:
+            parts.append("禁止 BUG_REPRO.md: " + ", ".join(sorted(forbidden_repro)))
         raise RuntimeError("交付文件位置校验失败；benzhi.Dockerfile、build_benzhi_docker.sh、BENZHI_README.md 必须位于仓库根目录（/）: " + "；".join(parts))
 
 
-def ensure_delivery_files(repo: Path, project: str, bug_repro: Path | None = None, module_path: str | None = None) -> None:
+def ensure_delivery_files(repo: Path, project: str, project_summary: str, module_path: str | None = None) -> None:
     """生成交付文件并强制其位于 GitHub 仓库根目录。
 
     即使 go.mod 位于子目录（如 backend/），Docker 构建上下文仍固定为仓库根目录；
     Dockerfile 会切换到模块目录执行 Go 命令。module_path 缺省时自动探测一层子目录。
     """
+    summary_issues = validate_project_summary(project_summary)
+    if summary_issues:
+        raise RuntimeError("项目类型简介不合格：" + "；".join(summary_issues))
     mod = find_go_mod(repo, module_path)
     if not mod:
         print(f"⚠️  未找到 go.mod（repo 根目录或一层子目录），跳过交付文件生成: {repo}")
@@ -324,6 +348,11 @@ def ensure_delivery_files(repo: Path, project: str, bug_repro: Path | None = Non
     module_rel = mod.parent.relative_to(repo)
     go_version = detect_go_version(mod)
     _remove_stale_nested_delivery_files(repo)
+    # BUG_REPRO.md is no longer part of the project or delivery branches.
+    for stale_repro in repo.rglob("*"):
+        if (".git" not in stale_repro.parts and stale_repro.name.lower() == "bug_repro.md"
+                and (stale_repro.exists() or stale_repro.is_symlink())):
+            stale_repro.unlink()
     (repo / "benzhi.Dockerfile").write_text(
         make_dockerfile(go_version, (mod.parent / "go.sum").exists(), module_rel.as_posix()),
         encoding="utf-8",
@@ -331,14 +360,10 @@ def ensure_delivery_files(repo: Path, project: str, bug_repro: Path | None = Non
     build_sh = repo / "build_benzhi_docker.sh"
     build_sh.write_text(make_build_script(), encoding="utf-8")
     os.chmod(build_sh, 0o755)
-    (repo / "BENZHI_README.md").write_text(make_readme(project, go_version, module_rel), encoding="utf-8")
+    (repo / "BENZHI_README.md").write_text(
+        make_readme(project, project_summary, go_version, module_rel), encoding="utf-8"
+    )
     (repo / ".dockerignore").write_text(".git\n*.log\n*.jsonl\nnode_modules\ndist\nbuild\n.env\n.env.*\n", encoding="utf-8")
-    if bug_repro and bug_repro.exists():
-        target_repro = repo / "BUG_REPRO.md"
-        if bug_repro.resolve() != target_repro.resolve():
-            shutil.copy2(bug_repro, target_repro)
-    elif bug_repro:
-        print(f"⚠️  未找到 BUG_REPRO.md: {bug_repro}（每条记录都应提供，见 SKILL.md 第 6.2 步）")
     _assert_root_delivery_files(repo)
 
 
@@ -385,7 +410,7 @@ def assign_repo_name(root: Path, base: str) -> str:
     return resolve_repo_name(root, base) or base
 
 
-def cmd_ensure(args):
+def _cmd_ensure_unlocked(args):
     root = Path(args.root)
     if not Path(args.local_path).is_dir():
         raise RuntimeError(f"local path not found: {args.local_path}")
@@ -429,7 +454,13 @@ def cmd_ensure(args):
     }, ensure_ascii=False))
 
 
-def cmd_publish(args):
+def cmd_ensure(args):
+    root = Path(args.root).resolve()
+    with repo_write_lock(root, args.repo_name):
+        _cmd_ensure_unlocked(args)
+
+
+def _cmd_publish_unlocked(args):
     root = Path(args.root)
     base = slugify(args.repo_name)
     repo_name = resolve_repo_name(root, base) or base
@@ -486,7 +517,7 @@ def cmd_publish(args):
     clear_worktree(repo)
     sync_bug_source(proj / "env", repo)
     _assert_no_symlinks(repo)
-    ensure_delivery_files(repo, proj_name, proj / "BUG_REPRO.md", getattr(args, "module_path", None))
+    ensure_delivery_files(repo, proj_name, read_project_summary(proj), getattr(args, "module_path", None))
     _assert_root_delivery_files(repo)
     run_git(repo, "add", "-A", "--", ".")
     run_git(repo, "commit", "-m", f"bug: {bug_id}", env=identity_env)
@@ -517,7 +548,13 @@ def cmd_publish(args):
     }, ensure_ascii=False))
 
 
-def cmd_finalize(args):
+def cmd_publish(args):
+    root = Path(args.root).resolve()
+    with repo_write_lock(root, args.repo_name):
+        _cmd_publish_unlocked(args)
+
+
+def _cmd_finalize_unlocked(args):
     """After acceptance, create G2 and an independent orphan R1."""
     root = Path(args.root)
     base = slugify(args.repo_name)
@@ -618,7 +655,7 @@ def cmd_finalize(args):
     g1_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
     _assert_no_tests(repo, g1_sha)
     sync_bug_source(env_dir, repo)
-    ensure_delivery_files(repo, proj_name, proj / "BUG_REPRO.md", getattr(args, "module_path", None))
+    ensure_delivery_files(repo, proj_name, read_project_summary(proj), getattr(args, "module_path", None))
     _assert_root_delivery_files(repo)
     business_changes = [
         name for name in run_git(repo, "diff", "--name-only", g1_sha, "--", ".").stdout.splitlines()
@@ -683,6 +720,12 @@ def cmd_finalize(args):
         "greenBranch": green_branch,
         "redBranch": red_branch,
     }, ensure_ascii=False))
+
+
+def cmd_finalize(args):
+    root = Path(args.root).resolve()
+    with repo_write_lock(root, args.repo_name):
+        _cmd_finalize_unlocked(args)
 
 
 def cmd_push_fix(args):

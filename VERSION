@@ -52,3 +52,5 @@
 2026-08-20 禁止领域前置门禁：新增完整 forbidden-domains 清单与 domain_guard.py；项目、功能点、题面三层语义审查前移到编码/建仓/埋错前，ensure/填表/题面自检/post_qc 自动复查，命中后必须换题不得只改文案
 2026-08-22 修复轨迹目标测试彻底隔离：新增私有 evaluator/、无 *_test.go 系统临时工作区、越界/测试工具调用守卫；正式轨迹不执行 verify_cmds 且不注入额外提示词；红绿证据与 post_qc 仅在临时副本注入 evaluator；GitHub 严格分为 fix commit 后 test commit
 2026-08-23 防答案泄漏拓扑改造：不再发布 main/干净基座；每条使用 orphan bugNNN_green G1→G2 与 orphan bugNNN_red R1；G1 零测试且生成 SHA-256 快照清单；finalize 在轨迹与绿灯后创建 G2/R1；轨迹审计改为 cheat/suspect/clean；post_qc 新增远程分支、共同祖先、文件树、快照与时序硬校验
+2026-08-24 校验收敛：post_qc 默认改为核对当前输入指纹绑定的 preflight/Docker 运行证据，仅 --recheck-runtime 显式复跑；4 文件/20 行、双机制、3 模块、四文件回退和固定题面结构降为辅助/可选证据；文案连续重复默认只提示，安全隔离、真实性、轨迹和仓库拓扑硬门禁保留。
+2026-08-24 交付说明调整：停止生成和提交 BUG_REPRO.md，项目目录与 green/red 分支均禁止该文件；workspace 创建记录时强制写入单行 project_summary.txt，发布时将其作为 BENZHI_README.md 第一行，并由 preflight/post_qc/仓库拓扑检查共同校验。

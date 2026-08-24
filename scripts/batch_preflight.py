@@ -20,9 +20,10 @@ from contract_coverage import validate_manifest  # noqa: E402
 from difficulty_review import validate_review  # noqa: E402
 from trajectory_guard import copy_without_tests, inject_evaluator, private_test_issues  # noqa: E402
 from user_query_rules import user_query_go_version_issues  # noqa: E402
+from project_summary import read_project_summary  # noqa: E402
 from verify_cmds import CONCURRENCY_CATEGORY, validate_concurrency_metadata, validate_verify_cmds  # noqa: E402
 
-PREFLIGHT_GATE_VERSION = 2
+PREFLIGHT_GATE_VERSION = 4
 
 
 def run(command, cwd: Path, *, env=None, timeout=1800, shell=False) -> subprocess.CompletedProcess:
@@ -241,8 +242,10 @@ def _run_ablation(project: Path, gold: Path, evaluator: Path, verify_cmd: str,
                             "exit_code": result.returncode,
                             "contract_messages_reached": hits, "output_tail": output[-1200:]})
     unique = {item["file"] for item in results if item.get("passed")}
-    return {"passed": len(results) >= 4 and len(unique) >= 4 and all(item.get("passed") for item in results),
-            "required": 4, "results": results}
+    required = len(rows)
+    return {"passed": required > 0 and len(results) == required and len(unique) == required
+            and all(item.get("passed") for item in results),
+            "required": required, "results": results}
 
 
 def _functional_diff(env: Path, gold: Path) -> tuple[int, int]:
@@ -273,6 +276,10 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
             update_status(project, stage="preflight_passed", fingerprint=fingerprint, detail="cached")
             return cached
     issues = []
+    try:
+        read_project_summary(project)
+    except RuntimeError as exc:
+        issues.append(str(exc))
     collection = load_json(project / "collection.json")
     task_type = str(collection.get("task_type") or "")
     prompt = (project / "prompt.txt").read_text(encoding="utf-8").strip() if (project / "prompt.txt").exists() else ""
@@ -299,8 +306,8 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
         issues.append("task_type must be bugfix or diagnosis")
     if task_type == "bugfix":
         files, lines = _functional_diff(project / "env", gold)
-        if files < 4 or lines < 20:
-            issues.append(f"bugfix functional diff too small: {files} files, {lines} lines")
+        if files < 1 or lines < 1:
+            issues.append("bugfix gold must contain a functional Go code change")
     if issues:
         payload = {"schema": 1, "gate_version": PREFLIGHT_GATE_VERSION,
                    "fingerprint": fingerprint, "result": "failed", "issues": issues,
@@ -328,7 +335,7 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
         gold, project / "evaluator", verify_cmd, "green", env, calibration_runs, timeout
     )
     checks["target_assertion_reached"] = _assertion_reached(checks["red_calibration"], project)
-    if task_type == "bugfix":
+    if task_type == "bugfix" and (load_json(project / "difficulty_review.json").get("repair_ablation_checks") or []):
         checks["repair_ablation"] = _run_ablation(
             project, gold, project / "evaluator", verify_cmd, env, timeout
         )

@@ -15,14 +15,17 @@
         env/                  # 埋好 bug 的业务代码（脚本由此生成无测试隔离副本）
         evaluator/            # 私有目标测试（修复轨迹不可见）
         prompt.txt            # 题面
+        project_summary.txt   # 单行项目类型简介，发布后成为 BENZHI_README.md 第一行
         <session_id>.jsonl    # 轨迹
         collection.json       # 本项目 21 字段填表数据
         收集表_<project>.xlsx  # 本项目独立填表数据
 
 用法:
   workspace.py init --root <dir> [--date YYYY-MM-DD]
-  workspace.py new-project --root <dir> --source github --repo <owner/repo|url> [--url <clone-url>] [--date YYYY-MM-DD]
+  workspace.py new-project --root <dir> --source github --repo <owner/repo|url> \
+      --project-summary '<包含 Go 与项目类型的一句话简介>' [--url <clone-url>] [--date YYYY-MM-DD]
   workspace.py new-project --root <dir> --source local --repo <name> --local-path <dir> \
+      --project-summary '<包含 Go 与项目类型的一句话简介>' \
       [--record 001] [--count 30] [--date YYYY-MM-DD]
   workspace.py list --root <dir> [--date YYYY-MM-DD] [--state <state>]
   workspace.py set --root <dir> --project <name> --state <state> [--reason <text>] [--date YYYY-MM-DD]
@@ -38,6 +41,8 @@ import sys
 from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
+
+from project_summary import validate_project_summary
 
 STATES = {"candidate", "selected", "done", "rejected"}
 SOURCES = {"github", "local"}
@@ -148,6 +153,11 @@ def cmd_new_project(args):
     root = Path(args.root)
     source = args.source
     d = date_dir(root, args.date)
+    summary = str(args.project_summary or "").strip()
+    summary_issues = validate_project_summary(summary)
+    if summary_issues:
+        print("❌ --project-summary 不合格：" + "；".join(summary_issues))
+        sys.exit(1)
 
     if source == "github":
         key = normalize(args.repo)
@@ -161,6 +171,7 @@ def cmd_new_project(args):
             sys.exit(1)
         proj.mkdir(parents=True, exist_ok=True)
         (proj / "repo").mkdir(exist_ok=True)
+        (proj / "project_summary.txt").write_text(summary + "\n", encoding="utf-8")
         data = {
             "name": key.replace("/", "__"),
             "source": "github",
@@ -187,7 +198,6 @@ def cmd_new_project(args):
             print(f"❌ 一个本地项目每次只能建 1~{LOCAL_MAX_RECORDS} 条记录；总数超过 {LOCAL_MAX_RECORDS} 时请拆成多个独立 0-1 项目和 GitHub 仓库。")
             sys.exit(1)
         src = Path(args.local_path)
-
         records = []
         if args.count and args.count > 1:
             records = [f"{i:03d}" for i in range(1, args.count + 1)]
@@ -209,6 +219,7 @@ def cmd_new_project(args):
             proj.mkdir(parents=True, exist_ok=True)
             (proj / "env").mkdir(exist_ok=True)
             (proj / "evaluator").mkdir(exist_ok=True)
+            (proj / "project_summary.txt").write_text(summary + "\n", encoding="utf-8")
             # env = 待埋错 workspace（模型工作目录）
             rsync_copy(src, proj / "env")
             # gold = 出题人私有答案区（干净基线 + 正确代码），项目目录外，不进交付
@@ -350,6 +361,8 @@ def main():
     c.add_argument("--repo", required=True, help="github: owner/repo 或 URL；local: 本地项目名")
     c.add_argument("--url", help="git 克隆地址（仅 github，默认 https://github.com/<owner>/<repo>）")
     c.add_argument("--local-path", help="本地项目源码目录（source=local 时必填）")
+    c.add_argument("--project-summary", required=True,
+                   help="单行项目类型简介，需包含 Go 和明确类型；将写入每条记录的 project_summary.txt")
     c.add_argument("--record", help="本地项目记录编号 001~030（单条，默认 001）")
     c.add_argument("--count", type=int, help="本地项目一次建几条（1~30；总数超过 30 时拆到多个仓库）")
     c.add_argument("--date")

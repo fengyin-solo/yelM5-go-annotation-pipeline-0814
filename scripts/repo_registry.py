@@ -24,6 +24,8 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
+from resource_lock import resource_lock
+
 SKILL_DIR = Path(__file__).resolve().parent.parent
 LOCAL_DIR = Path.home() / ".codex" / "go-annotation-pipeline"
 DEFAULT_REGISTRY = LOCAL_DIR / "used-repositories.json"
@@ -160,7 +162,9 @@ def load(path: Path | None = None) -> dict:
 def save(data: dict, path: Path | None = None) -> Path:
     p = path or registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(p)
     return p
 
 
@@ -224,7 +228,7 @@ def cmd_check(args):
     sys.exit(0)
 
 
-def cmd_register(args):
+def _cmd_register_unlocked(args):
     data = load()
     source, key, disp = identify(args.repo, args.source, args.github_url, args.local_path)
     r = find(data, key, source)
@@ -282,6 +286,12 @@ def cmd_register(args):
         print(f"   GitHub: {github_url}")
 
 
+def cmd_register(args):
+    lock = registry_path().with_name(registry_path().name + ".lock")
+    with resource_lock(lock, label="全局仓库注册表"):
+        _cmd_register_unlocked(args)
+
+
 def cmd_list(args):
     data = load()
     print(f"已用仓库/项目 {len(data.get('repositories', []))} 个：")
@@ -295,7 +305,7 @@ def cmd_list(args):
             print(f"      local:  {r.get('local_path')}")
 
 
-def cmd_sync(args):
+def _cmd_sync_unlocked(args):
     data = load()
     md = md_path()
     md.parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +314,12 @@ def cmd_sync(args):
     dst = mirror_to_root(data, args.root)
     if dst:
         print(f"✅ 已镜像到 {dst}")
+
+
+def cmd_sync(args):
+    lock = registry_path().with_name(registry_path().name + ".lock")
+    with resource_lock(lock, label="全局仓库注册表"):
+        _cmd_sync_unlocked(args)
 
 
 def main():

@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_preflight import declared_version, lc_uuid_required, preflight_project, toolchain_canary  # noqa: E402
 from batch_state import atomic_json, input_fingerprint, iter_projects, load_json, update_status  # noqa: E402
+from resource_lock import lock_name, resource_lock  # noqa: E402
 
 
 HERE = Path(__file__).resolve().parent
@@ -295,6 +296,34 @@ def model_phases(project: Path, root: Path, args) -> None:
     green(project, root, args)
 
 
+def record_pipeline(project: Path, root: Path, args) -> None:
+    """Advance one record independently; shared Git writes lock inside github_project.py."""
+    lock = root / "_locks" / "records" / lock_name(str(project.resolve()))
+    with resource_lock(lock, label=f"记录 {project.name}"):
+        reconcile(project)
+        publish(project, root, args)
+        model_phases(project, root, args)
+        finalize(project, root, args)
+
+
+def run_record_pipelines(projects: list[Path], root: Path, args) -> None:
+    failures = []
+    workers = max(1, min(args.workers, len(projects)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batch-record") as pool:
+        futures = {pool.submit(record_pipeline, project, root, args): project for project in projects}
+        for future in as_completed(futures):
+            project = futures[future]
+            try:
+                future.result()
+                print(f"PASS {project.name}: record pipeline")
+            except Exception as exc:
+                failures.append((project, exc))
+                print(f"FAIL {project.name}: {exc}", file=sys.stderr)
+    if failures:
+        names = ", ".join(project.name for project, _ in failures)
+        raise RuntimeError(f"record pipelines failed for {len(failures)} record(s): {names}")
+
+
 def run_model_phases(projects: list[Path], root: Path, args) -> None:
     failures = []
     with ThreadPoolExecutor(max_workers=max(1, args.model_workers), thread_name_prefix="batch-model") as pool:
@@ -404,15 +433,9 @@ def main() -> int:
             do_preflight(projects, root, args)
         elif not all(stage_passed(p, "preflight_passed") for p in projects):
             raise RuntimeError("resume requires every selected record to have passed preflight")
-        # Publish all immutable G1 snapshots before consuming target-model time.
-        for project in projects:
-            reconcile(project)
-        for project in projects:
-            publish(project, root, args)
-        run_model_phases(projects, root, args)
-        # All records in one repo share the staging Git worktree, so finalize stays serial.
-        for project in projects:
-            finalize(project, root, args)
+        # Records advance independently. Git writes are serialized per staging repo,
+        # while model work and records backed by different repos can overlap.
+        run_record_pipelines(projects, root, args)
         if not args.skip_upload:
             finish(projects, root, args)
         return 0

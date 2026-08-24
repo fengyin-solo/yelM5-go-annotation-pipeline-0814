@@ -21,6 +21,8 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
+from resource_lock import resource_lock
+
 from user_query_rules import user_query_go_version_issues
 
 try:
@@ -281,7 +283,7 @@ def cmd_write(args):
     print(f"✅ 项目独立表: {p / f'收集表_{p.name}.xlsx'}")
 
 
-def cmd_sync(args):
+def _cmd_sync_unlocked(args):
     root = Path(args.root)
     rows = collect_rows(root)
     if not rows:
@@ -293,6 +295,12 @@ def cmd_sync(args):
         f = p / f"收集表_{p.name}.xlsx"
         write_xlsx(f, [row])
         print(f"   - {f}")
+
+
+def cmd_sync(args):
+    root = Path(args.root).resolve()
+    with resource_lock(root / "_locks" / "collection-table.lock", label="收集表汇总"):
+        _cmd_sync_unlocked(args)
 
 
 def cmd_list(args):

@@ -60,12 +60,12 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 4. GitHub 去重身份**优先用 GitHub 地址，其次用本地路径**。
 5. 交付只提交 GitHub `repo_url` 分支地址；不再提交修复 commit 字段，不打 zip、不截图。
 6. Dockerfile 要支持 arm64/amd64，但本流程**实际只验证当前机器平台**。
-7. **BUG_REPRO.md 是每条记录的交付复现说明**，记录 Bug 是什么 / 如何触发 / 错误信息；只进 GitHub 交付分支，不进测试模型的 `env/`。
+7. **项目和交付分支禁止包含 `BUG_REPRO.md`**。每条记录用 `project_summary.txt` 保存一句包含 Go 与项目类型的简介，发布时写到 `BENZHI_README.md` 第一行。
 8. **Docker 验证和 G1 发布必须在跑轨迹前完成；G2/R1 只能在轨迹、私有绿灯和全量回归通过后创建**。不得远程发布 `main`、干净基座、gold 或其他可用于反推答案的分支。
 9. **GitHub 仓库名用真实项目名，长度 3-5 个英文单词**：用「领域 + 用途 + 类型」拼成描述性名字（如 `sensor-telemetry-ingestion-service`），既具体又不至于重名；不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 等字样；本地项目名用领域命名，别用 `forex` 这类泛化名。
 10. **`verify_cmds` 对 bugfix / diagnosis 都必填，且只能是目标 Bug 的定向复现命令**：明确写出唯一目标包、精确测试名和 `-count=1`（并发类加 `-race`），禁止 `go test ./...`、通配包、当前目录、多包或拼接全量回归；命令对应的测试必须完整覆盖 `user_query` 描述的全部现象与触发条件。红、绿证据轨迹都必须**只实际执行一次**这条命令，实际 Bash 调用、最终回复【命令】和正式填表的 `verify_cmds` 必须逐字符完全相同，空格、路径写法、引号、参数顺序均不得变化；bugfix 校验红+绿，diagnosis 校验红。
-11. **Bug 难度与修复规模是双重硬门禁**：bugfix 的 gold 修复必须同时改动至少 4 个不同的功能代码文件，并且功能代码增删总行数至少 20 行；`_test.go`、README、文档、注释和交付文件不计数，禁止拆文件或堆无效代码凑数。
-12. **改动规模只是必要条件，不代表题目够难**：核心缺陷必须由至少 1 个 Go 运行时机制与另 1 个不同机制耦合形成，跨至少 3 个模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误，即使扩写到 4 文件和 20 行也不合格。
+11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。文件数和增删行数只记录为辅助信息，不作为通用硬门禁。
+12. **禁止用规模冒充难度**：纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误通常不合格；但是否合格以真实定位难度、故障传播和测试证据判断，不要求人为扩写到固定文件数或行数。
 13. **禁止项目/功能点门禁优先于埋错和难度设计**：查账账务与订单类为最高优先级禁区，完整清单见 [references/forbidden-domains.md](references/forbidden-domains.md)。项目总体允许不代表每个功能点都允许；任一单条功能点命中禁区就立即换题，不得先埋错再靠改写 `user_query` 规避。
 
 ## 流程总览（编号与下文章节一一对应）
@@ -75,7 +75,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 3. **环境构建** → 埋 bug（env）+ gold 修复（_gold）+ 本地量改动规模
 4. **题面写作** → 产出 user_query、task_type（含 4.1 难度审查、4.2 去重自检）
 5. **红绿校准** → 产出 verify_cmds、success_criteria、gold_root_cause
-6. **Docker 验证 + 写 BUG_REPRO + 发布 GitHub**（跑轨迹前）→ 产出 repo_url
+6. **Docker 验证 + 项目简介 + 发布 GitHub**（跑轨迹前）→ 产出 repo_url
 7. **无测试跑修复轨迹**（Claude Code 干净 session）→ 脚本用系统临时隔离副本运行，副本中没有任何 `*_test.go`，模型只收到 `prompt.txt` 原文
 8. **轨迹质检四查** → `cheat/suspect/clean` 防作弊审计 → 私有绿灯验收 → `finalize` 生成 G2/R1
 9. **填收集表 + 上传轨迹 + 收尾登记** → 产出 collection
@@ -101,6 +101,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
       env/                      #   埋好 bug 的业务代码（脚本由此生成无测试隔离副本）
       evaluator/                #   私有目标测试（镜像项目相对路径；修复轨迹不可见）
       prompt.txt                #   题面
+      project_summary.txt       #   单行项目类型简介，生成 BENZHI_README.md 第一行
       <session_id>.jsonl        #   轨迹（文件名 == session_id）
       collection.json           #   本项目 21 字段填表数据（唯一事实源）
       _failed_rounds/           #   失败轮次归档（重跑时自动迁入上一轮轨迹/绿灯产物，不污染本轮）
@@ -143,9 +144,9 @@ prepared -> preflight_passed -> g1_published -> red_passed -> main_running
 | `python3 <skill>/scripts/build_docker.py` | Docker 本机验证（不打包、不截图） |
 | `python3 <skill>/scripts/configure.py` | 首次配置向导：`check` 自检 / `setup` 写配置 / `show` 查看 / `reset-registry` 清空已用清单 |
 | `python3 <skill>/scripts/domain_guard.py` | 禁止项目/功能点最低门禁：建仓和埋错前检查项目描述、仓库名、README 与候选功能点；通过后仍须人工语义审查 |
-| `python3 <skill>/scripts/post_qc.py` | **后置质检**（交付前硬校验）：`--root .` 对整期所有记录做预检留证/隐私门禁/build/scope/red/green/文件/字段/证据/轨迹守卫/诊断零改动/验证命令覆盖/难度审查/禁止领域/仓库拓扑检查 |
+| `python3 <skill>/scripts/post_qc.py` | **后置质检**：默认核对输入指纹绑定的运行证据、隐私、文件、字段、轨迹和仓库拓扑，不重复执行 build/红绿命令；仅排障时加 `--recheck-runtime` |
 | `python3 <skill>/scripts/batch_pipeline.py` | 推荐批次入口：`preflight` / `run` / `resume` / `status`，负责一次性预检、状态恢复、自动流转、本地并发和批末集中同步 |
-| `python3 <skill>/scripts/batch_preflight.py` | 单独批次预检：工具链 canary、输入指纹、无原始测试 evaluator 编译、diagnosis 验收器自检、20/20 红绿校准、目标断言到达和 bugfix 四文件回退实跑留证 |
+| `python3 <skill>/scripts/batch_preflight.py` | 单独批次预检：工具链 canary、输入指纹、无原始测试 evaluator 编译、diagnosis 验收器自检、20/20 红绿校准和目标断言到达；逐文件回退按题目需要选用 |
 
 ## 批次编排（多条记录默认使用）
 
@@ -256,11 +257,13 @@ python3 <skill>/scripts/workspace.py init --root .
 
 ```bash
 python3 <skill>/scripts/workspace.py new-project --root . --source local \
-  --repo <repo_name> --local-path <项目目录> --count <1-30>
+  --repo <repo_name> --local-path <项目目录> --count <1-30> \
+  --project-summary '<包含 Go 与项目类型的一句话简介>'
 ```
 
 - 每条记录目录是 `YYYY-MM-DD/<name>__<record>/`，单仓 record=001–030。
 - `env/` 是待埋 bug 的 workspace；`_gold/<name>__<record>/` 是 gold 答案区，模型不可达。
+- `project_summary.txt` 由 `new-project` 自动写入，必须只有一行，包含 `Go` 和明确类型（如 CLI、命令行工具、服务、API、系统或库）。例如：`基于 Go 实现的停车场管理 CLI 项目，一款命令行工具，完成车位录入、车辆进出登记与费用核算。`
 - 建完后对每条记录 `workspace.py set --root . --project <name>__<record> --state selected`。
 
 ### 2.1 超过 30 条时拆仓（硬规则）
@@ -278,18 +281,18 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
    - **先审功能点再设计机制**：用 `domain_guard.py --text '<业务功能点 + 触发流程 + 用户可见结果>'` 检查，并按 forbidden-domains.md 人工复核。命中禁区时更换功能点；不得在禁用功能上继续选择 P1-P12、写测试或埋错。
    - 按 bug_category 选型。bug_category 只允许以下取值：`concurrency并发问题` / `slice相关问题` / `error异常错误` / `nil相关问题` / `context相关问题` / `defer相关问题` / `其他问题`；优先 concurrency / nil / slice / error / context / defer 里多步定位、强模型也会栽的缺陷。
    - **埋法从深度模式库随机抽取**：`python3 <skill>/scripts/pick_bug_pattern.py`（P1–P12，详细埋法见 [references/bug-patterns.md](references/bug-patterns.md)）；单仓达到 13–30 条时允许轮换复用模式骨架，但同一模式必须换业务层次、埋点组合、触发条件和用户可见症状，不能复刻同一个 bug。优先轮完 P1–P12 后再复用，`--exclude` 只排除近期已用模式。
-   - **硬性红线（机制 + 规模）**：核心缺陷必须是「主运行时机制 + 不同耦合机制」组成的一条不可拆故障链，跨至少 3 个模块/包，并依赖时序、生命周期或状态转换触发；bugfix 的 gold 修复还必须**同时满足**「至少改动 4 个不同的功能代码文件」和「功能代码增删总行数至少 20 行」。禁止纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边，以及拆文件或堆无效代码凑规模。详细门禁见 [references/rules.md](references/rules.md) 的「埋错复杂度红线」。
+   - **硬性红线（真实故障链）**：核心缺陷必须涉及运行时机制，跨至少 2 个相关模块/包，并依赖时序、生命周期或状态转换触发。文件数和增删行数只用于辅助审查；不得拆文件或堆无效代码制造表面规模。详细标准见 [references/rules.md](references/rules.md) 的「埋错复杂度红线」。
    - 埋完不得留任何「这里故意埋错」的注释或说明。
    - **埋错自检（本地、发布前）**：直接对比 `env/` 与 `_gold/` 统计功能代码改动规模，不需要等 GitHub 分支：
 
      ```bash
      git diff --no-index --numstat <project>/env _gold/<name>__<record> \
        | grep -Ev '(_test\.go|README|\.md$|BENZHI|benzhi\.Dockerfile|build_benzhi_docker\.sh)' \
-       | awk '{add+=$1; del+=$2; n++} END {lines=add+del; print n" files, "lines" changed lines (+"add"/-"del")"; exit !(n>=4 && lines>=20)}'
+       | awk '{add+=$1; del+=$2; n++} END {print n" functional files, "add+del" changed lines (+"add"/-"del")"}'
      ```
 
-     命令只有在候选功能文件数 ≥4 且增删总行数 ≥20 时退出码为 0；任一条件不达标就重新设计，不得进入红绿校准。该命令只能做机械统计，达标后仍要人工查看 diff，剔除注释、格式化、拆文件和无效代码后再次确认有效功能代码仍 ≥20 行。最终复核仍对比本地埋错基线与 `_gold/`；**不要在跑完轨迹后的 env 上量**（env 已被测试模型改回接近 gold，diff 会很小）。
-   - **难度审查必须在题面完成后、红绿校准前通过**：先运行 `difficulty_review.py init` 创建私有审查单，填写主/次机制、触发顺序、跨层范围、题面症状与测试断言映射；bugfix 还要逐个回退至少 4 个修复文件的关键改动，并确认每次定向测试重新变红。审查单只放记录根目录，不进 `env/`、不交给测试模型。
+     该命令只用于观察改动规模，不再以固定文件数或行数决定通过。人工查看 diff，排除注释、格式化、拆文件和无效代码，并确认修复确实对应故障链。最终复核仍对比本地埋错基线与 `_gold/`；**不要在跑完轨迹后的 env 上量**。
+   - **难度审查必须在题面完成后、红绿校准前通过**：先运行 `difficulty_review.py init` 创建私有审查单，填写机制、触发顺序、跨层范围、题面症状与测试断言映射。对确实分布在多个文件的修复，可填写 `repair_ablation_checks` 并逐文件回退留证，但不作为所有 bugfix 的统一要求。
    - **目标测试只能写入 `<project>/evaluator/`**，并按它最终进入 Repo 的相对路径存放。G1 和正式轨迹快照中不得有任何测试文件、`test/tests/testdata/evaluator` 夹具目录或常见 test/spec 文件；验收测试只在收题后的 G2/R1 出现。
 2. **在 `_gold/<name>__<record>/` 里写 gold 修复**：
    - 这是**执行本流程的模型（当前 Codex）自己写的正确修复**。
@@ -303,20 +306,19 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
 
 ### 写法核心：一次真人求助，不是一份报告
 
-- **先定人设再动笔**：每条题面给说话人想一个不同的「人设」——着急赶上线的、随口一提的、话很少的、稍微絮叨的、半懂不懂的……用人设带出措辞和语气差异。**禁止从任何现成句式池里挑句子**，包括本技能旧版文档里出现过的示例句（查重脚本已将它们列为禁句）。
-- 长度以 40–150 字为主，2–5 个短句；各题长短要拉开，不要每条都写成三句半。
+- 使用自然、具体的真人求助口吻；不要套用现成句式池。长度和句数按说明问题所需决定，不设固定区间。
 - 收敛到**唯一目标缺陷**；根因、源码位置、文件名、函数名、测试名、修复方案一律不进题面，从「症状」写起。
-- **难度必须来自真实现象，不靠堆术语**：题面必须自然写出至少 2 步有顺序的触发过程、至少 2 个相关联的用户可见症状，以及正确行为预期；这些内容必须都被同一条定向测试覆盖。不得为了显难凭空增加未复现、未断言的现象。
+- **难度必须来自真实现象，不靠堆术语**：写清足以稳定触发问题的过程、主要用户可见症状和正确预期；所有描述必须被同一条定向测试覆盖。不得为了数量凭空增加未复现、未断言的现象。
 - **task_type 指令必须明确写进题面（红线）**：bugfix 写「请修复 xxx / 帮我修好 xxx」；diagnosis 写「不要修改代码，帮我定位 xxx / 文件先不要改，帮我查清楚原因」——说法逐条换，意思不能含糊。
 
 ### 信息要素：要素齐全，写法自由
 
 题面要让模型能直接开工：**出了什么事 + 要它干什么**（现象、背景、环境都是为把诉求说清楚服务）。以下要素都要覆盖，但组织方式必须逐条不同：
 
-1. **触发过程**：口语化写清先发生什么、随后在什么状态下又做了什么，至少 2 步；不能只给一个输入值和一次函数调用。
-2. **关联症状**：至少 2 个真实可见且属于同一故障链的现象，例如请求已返回但后台仍重试，随后请求又继承旧错误；报错只贴 1 行最关键的。
+1. **触发过程**：口语化写清复现所必需的操作和状态顺序；简单输入足以触发时无需人为扩写步骤。
+2. **关联症状**：写出目标缺陷真实产生的主要可见现象；存在多个相关症状时一并说明，不要求凑数量。
 3. **正确预期**：说清取消后应停止、后续请求应隔离、失败不应留下副作用等公开行为，不写修复方案。
-4. **一句自然的背景或情绪**（每条现编，不得复用任何见过的句子）。
+4. **必要背景**：只写帮助理解问题的上下文，不要求添加情绪或废话。
 5. **环境交代**只需自然写“当前项目就可以了”；禁止写 Go 版本号或 Go 工具链版本。是修复还是只定位，另用任务指令说清。
 6. **任务指令**（红线，见上）：bugfix 说清「帮我修好」，diagnosis 说清「先别改代码、帮我定位原因」。
 7. **纯提示词红线**：**不写任何验收/复现/运行指令，不贴命令代码块，也不要要求对方运行、执行、重跑或验证测试**；`verify_cmds`、复现命令只进 collection.json 与红/绿证据阶段，绝不进题面。只描述真实现象、触发过程、公开预期和修复/定位诉求。
@@ -333,9 +335,7 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
 
 ### 防雷同（红线）
 
-- 任意两题 `user_query` 不得有 12 字以上完全相同的连续片段；现象可以相近（同一个项目），但表达必须换说法。
-- 结构也要错开：长短、句序、要素组合逐条不同，不能全是同一个骨架换词。
-- 写完必须运行第 4.2 步去重检查，有红就改，改到全绿再进第 5 步。
+- 避免整批套用同一个模板。`check_prompt_duplicates.py` 默认以 24 字连续重复作为人工复核提示，不阻断真实且必要的相同术语；需要严格批次策略时才使用 `--strict-duplicates`。
 
 ### 去 AI 味（红线）
 
@@ -358,12 +358,12 @@ python3 <skill>/scripts/contract_coverage.py init --project <project>
 python3 <skill>/scripts/contract_coverage.py check --project <project>
 ```
 
-- `primary_runtime_mechanism` 必须是运行时机制，`coupled_runtime_mechanisms` 至少 1 项且不能与主机制相同。
+- `primary_runtime_mechanism` 必须是运行时机制；`coupled_runtime_mechanisms` 可选，填写时必须是不同且真实存在的机制。
 - 必须填写 `core_defect_review`：核心缺陷必须是真实运行时机制失效，且必须依赖调用顺序/生命周期和跨层状态传导；同时明确证明它不是索引、边界、容量、字段映射、比较符/条件分支、单 `%w`、单 nil 判断、单状态漏边或单函数输入输出变换。`failure_chain` 与 `local_fix_rejection` 各至少 20 字，不能用“改了多个文件”替代故障链证据。
-- `core_defect_review.minimum_function_files` 是“根本修复实际需要”的功能文件数：bugfix 至少 4，diagnosis 至少 3；`root_cause_locations` 必须逐项列出这些真实存在的功能 Go 文件，以及各自的运行时职责和对故障链的贡献。若只需一个局部逻辑改动，直接淘汰，不得靠拆文件、格式化、注释或防御性凑代码达标。
-- `trigger_sequence` 至少 2 步，`affected_layers` 至少 3 个模块/包。
-- `query_evidence` 的触发与预期片段、`symptom_coverage` 的至少 2 个症状片段必须逐字来自 `user_query`；每个症状都写明目标测试中的对应断言。
-- bugfix 的 `repair_ablation_checks` 至少列 4 个不同功能 Go 文件。逐个暂时回退该文件的关键修复、执行原样 `verify_cmds`，只有每次都重新变红才能填 `result: "red"`；完成后恢复 gold。
+- `core_defect_review.minimum_function_files` 与 `root_cause_locations` 至少覆盖 2 个真实相关功能文件，并说明各自的运行时职责和故障贡献。不得靠拆文件、格式化、注释或防御性代码凑数。
+- `trigger_sequence` 记录真实所需的触发顺序，`affected_layers` 至少包含 2 个相关模块/包。
+- `query_evidence` 的触发与预期片段、`symptom_coverage` 的主要症状片段必须逐字来自 `user_query`；每个已填写症状都写明目标测试中的对应断言。
+- `repair_ablation_checks` 是可选增强证据。填写时每个条目都必须真实回退对应修复、执行原样 `verify_cmds` 并重新变红；未填写时不阻断普通 bugfix。
 - `manual_reviewed` 只能在真实审阅代码、diff 和复跑结果后设为 `true`。脚本只校验证据结构，不能代替人工判断机制是否真实。
 - 新建的 `contract_coverage.json` 使用 version 2：除每条 evaluator `Fatal/Fatalf/Error/Errorf` 映射到题面触发、题面预期、`success_criteria` 和难度证据外，`test_cases` 还必须将 evaluator 设置输入的精确源码片段映射到题面触发与预期。输入片段不能拿断言文案代替；空字符串或 nil 边界必须在题面片段中点名对应字段。题面包含“照常/仍能/不影响”等既有行为要求时，必须增加 `kind: preservation` 映射。旧 version 1 成品只做兼容复核，新数据不得手工降级。
 
@@ -375,7 +375,7 @@ python3 <skill>/scripts/contract_coverage.py check --project <project>
 python3 <skill>/scripts/check_prompt_duplicates.py --root .
 ```
 
-脚本会递归扫描各 `YYYY-MM-DD/<record>/prompt.txt` 与 `collection.json` 里的 `user_query` / `success_criteria` / `verify_cmds` 三条文案，报告禁止业务类型、`user_query` 中的 Go 版本环境描述、被禁模板句和任意两题同一字段 >= 12 字的连续重复片段。禁止业务类型有红时必须回到功能点阶段换题，不能只改文案；其余文案红线改到全绿后再进入第 5 步。
+脚本会递归扫描各 `YYYY-MM-DD/<record>/prompt.txt` 与 `collection.json` 里的 `user_query` / `success_criteria` / `verify_cmds`，硬性拦截禁止业务、内部构造泄漏、Go 版本环境描述和已知模板句；默认把任意两题同一字段 >=24 字的连续重复片段作为人工复核提示。只有批次明确要求严格去重时才加 `--strict-duplicates`。
 
 ## 第 5 步：红绿校准（出题自检）
 
@@ -385,7 +385,7 @@ python3 <skill>/scripts/check_prompt_duplicates.py --root .
 
 1. `env`（埋好 bug）+ verify_cmds → **必须红**。
 2. 打上 gold 修复 + verify_cmds → **必须绿**（全量测试无回归）。
-3. 逐个回退 `difficulty_review.json` 中至少 4 个功能文件的关键修复 → 每次都用原样 `verify_cmds` **重新变红**；每次检查后恢复该文件，最终完整 gold 再次为绿。
+3. 若 `difficulty_review.json` 填写了 `repair_ablation_checks`，逐项回退并用原样 `verify_cmds` 重新验证；每次检查后恢复该文件，最终完整 gold 再次为绿。
 
 - `verify_cmds` 必须是单条定向命令，形如 `go test ./path/to/pkg -run '^TestTargetBug$' -count=1`；`concurrency并发问题` 必须显式加 `-race`，脚本会按 `bug_category` 强制校验。禁止 `go test ./...`、`.`、`...`、多包、多个测试或拼接回归命令。
 - 并发 bugfix 的 `repro_determinism` 必须填 `deterministic`；具体的同步原语、交错控制、测试钩子或超时边界及稳定性验收事实写入 `success_criteria`，diagnosis 还必须在 `gold_root_cause` 说明同一方案。只写“稳定复现”“多跑几次”不合格。
@@ -413,11 +413,9 @@ python3 <skill>/scripts/check_prompt_duplicates.py --root .
 - 红灯事实写“问题存在时 / 修复前 / 当前代码中”，绿灯事实写“修复后”；不得写“埋错态 / 埋错环境 / 注入缺陷后”。
 - `gold_root_cause` 只写最终可复核的文件、符号和故障机制，不交代缺陷是怎样被构造出来的。
 - `success_criteria` 只写业务触发、故障表现、修复后的公开行为、回退复现与回归结果；不得出现 `env`、`_gold`、出题人或测试模型等内部角色和目录。
-- `BUG_REPRO.md` 虽不是收集表字段，也采用同一叙事视角：只说程序有什么问题、如何触发和看到什么错误，不说人为构造过程。
-
 `collection_table.py write` 和 `post_qc.py` 会对上述交付字段执行同一套禁词校验；命中即拒绝写入或判后置质检失败。
 
-## 第 6 步：Docker 验证 + 写 BUG_REPRO + 发布 GitHub（跑轨迹前）
+## 第 6 步：Docker 验证 + 项目简介 + 发布 GitHub（跑轨迹前）
 
 > 必须在跑轨迹前发布 orphan `bug<record>_green` G1：恰好一个无父提交，含 Bug 代码且无任何测试资产。此时 G2 和 R1 绝对不得存在。
 
@@ -427,20 +425,18 @@ python3 <skill>/scripts/check_prompt_duplicates.py --root .
 python3 <skill>/scripts/build_docker.py verify --root . --project <name>__<record>
 ```
 
-- 验证 `env/`（bug 环境）能构建，触发错误并拿到完整错误信息（写进 BUG_REPRO.md）。
+- 验证 `env/`（bug 环境）能构建，并实际确认目标问题可触发。
 - 验证 `_gold/<project>/`（gold 环境）`go build ./...` 与 `go test ./...` 全绿。
 - Dockerfile 基于官方 golang 多架构基础镜像，支持 arm64/amd64；本流程只验证当前机器平台。
-- 刻意包含构建失败 Bug 时，`build_docker.py verify` 的自动验证不适用；需人工改造**仓库根目录**的 `benzhi.Dockerfile`（删掉对应的 `RUN go build` / `npm run build`）后手动在容器内复现，并把复现结果写进 `BUG_REPRO.md`。
+- 刻意包含构建失败 Bug 时，`build_docker.py verify` 的自动验证不适用；需人工改造**仓库根目录**的 `benzhi.Dockerfile`，再手动在容器内验证。
 
-### 6.2 写 BUG_REPRO.md（交付复现说明，不进 env）
+### 6.2 项目类型简介
 
-在 `<project>/BUG_REPRO.md` 写复现说明，内容只含三类信息：
+`<project>/project_summary.txt` 必须在创建记录时生成并保持为单行。内容说明项目使用 Go 实现、属于什么类型、主要完成什么功能，例如：
 
-1. **Bug 是什么**
-2. **如何触发**
-3. **错误信息**
+`基于 Go 实现的停车场管理 CLI 项目，一款命令行工具，完成车位录入、车辆进出登记与费用核算。`
 
-> 红线：写 `<project>/BUG_REPRO.md`，**不要写进 `env/`**；`env/` 是测试模型跑轨迹的 workspace，放进去会泄题。
+发布脚本会把该句逐字写到仓库根目录 `BENZHI_README.md` 的第一行。`project_summary.txt` 是记录元数据，不进入 GitHub 分支。项目目录、`env/` 和交付分支均不得包含 `BUG_REPRO.md`。
 
 ### 6.3 发布 Bug 分支，产出 repo_url
 
@@ -455,17 +451,16 @@ python3 <skill>/scripts/github_project.py publish \
 - 先硬性检查 `evaluator/` 中的目标测试不存在于 `env/`；
 - 用 `git checkout --orphan` 创建 `bug<record>_green`，把排除所有 `*_test.go` 的 `env/` 与交付文件写成 G1 单提交；
 - **强制校验** `benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 均在仓库根目录；若旧版在模块子目录留下同名副本，脚本会清理后再发布；
+- **强制校验** `BENZHI_README.md` 第一行与 `project_summary.txt` 一致，且所有交付分支都不含 `BUG_REPRO.md`；
 - 写入 `<project>/_delivery/g1_snapshot.json`，记录模型可见文件的 SHA-256；`run_trajectory.py` 必须逐文件匹配该清单才能开跑；
 - 输出 green `repoUrl`（填 `repo_url`）；本地 `_gold/` 不提交到 GitHub。
-
-> 注意：`BUG_REPRO.md` 只进 GitHub 交付分支，测试模型的 `env/` 里没有这个文件。
 
 ## 第 7 步：跑轨迹
 
 - 每个 session 只产一条数据；环境目录下**从未开过** claude session。
 - **红灯门禁（红线）**：开跑修复轨迹之前，必须先完成附录的红灯证据（`run_evidence_trajectories.py generate --phase red`）且达标——测试模型实测确认 bug 在基线上可复现。红灯不过说明埋错质量不行，回滚重新埋错，不得开跑正式轨迹（避免白烧一场限流额度）。`run_trajectory.py run` 会自动检查：缺少 `_evidence/red_result.json` 即拒绝开跑，不允许跳过。
 - **交付轨迹必须是 Claude Code 原始 session 文件（红线）**：三条轨迹（修复轨迹、红灯、绿灯）都直接取 Claude Code 自己落盘的 `~/.claude/projects/<按 cwd 转换的目录>/<session_id>.jsonl` 原始文件，不再用捕获 stdout 拼装的 stream-json 交付。`run_trajectory.py run` 与 `run_evidence_trajectories.py generate` 成功后会按 session_id 自动取出保存；stdout 捕获只用于运行时校验，另存为 `*.stream.jsonl` 备查，不交付。
-- **不能暴露本技能/答案线索（红线）**：`env/` 和 `prompt.txt` 中不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、本技能名等标记；`run_trajectory.py` 会在跑之前自动检查并拒绝。
+- **不能暴露本技能/答案线索（红线）**：`env/` 和 `prompt.txt` 中不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、本技能名等标记；其中 `BUG_REPRO.md` 已全面禁用，脚本仍会防御性拒绝旧残留。
 - **单轮强制约定（红线）**：全程有且仅有**一条用户输入**，内容就是 `prompt.txt` 原样；不得追加任何说明、不得输入任何斜杠命令（`/model`、`/status`、`/clear`、`/help` 等），也不得有任何“运行命令式”的额外输入。出现第二条用户消息或任意斜杠命令即不合格，必须回滚重跑。
 - **不注入任何额外约束文字（红线）**：不使用 `--system-prompt` / `--append-system-prompt`，不向题面拼接“不得读测试”等专门说明。轨迹文件中只能看到 `prompt.txt` 原文；隔离与限制完全由脚本实现。
 - **G1 单分支快照隔离（红线）**：`run_trajectory.py` 将校验快照与 `g1_snapshot.json` 完全一致，再在系统临时目录生成无测试资产、无 `.git`、无交付线索的副本。绝不把原始多分支 repo 交给模型。
@@ -534,7 +529,7 @@ python3 <skill>/scripts/analyze_trajectory.py <project>/trajectory.jsonl
 
 - `cheat`：读取预置验收测试、`.git`/历史 diff、`_gold`、`evaluator` 或工作区外答案线索；直接作废。
 - `suspect`：只能确认枚举/搜索过测试，或最终修改文件在测试搜索后才首次打开；必须人工读轨迹并写 `trajectory_review.json`。
-- `clean`：结论由题面和模型已读的实现代码足以支撑。运行测试查看失败输出、已经读实现后再确认期望、读只描述现象的 README/BUG_REPRO、模型自建复现脚本，本身不算作弊。
+- `clean`：结论由题面和模型已读的实现代码足以支撑。运行测试查看失败输出、已经读实现后再确认期望、读取普通项目 README、模型自建复现脚本，本身不算作弊。
 
 `suspect` 人工复核通过时写入：
 
@@ -637,24 +632,22 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 
 只读、不改产物。逐条输出 ✅/❌，最终汇总；有任何一条不合格就退出码非 0。校验项：
 
-1. **build**：`env` 与 `_gold` 都能 `go build ./...`（项目能编译）；
-2. **scope**：bugfix 的 gold 修复相对埋错基线同时满足功能代码文件数 ≥4、增删总行数 ≥20；
-3. **red**：埋错基线 `.base_snapshot` 跑 `verify_cmds` 必须红（bug 真实可复现）；
-4. **green**：`_gold` 跑同样命令必须绿；
+1. **runtime**：核对 preflight 与 Docker 留存的 build、回归和 20/20 红绿证据及输入指纹，默认不重复执行；排障时加 `--recheck-runtime` 显式复跑；
+2. **scope**：报告功能代码改动文件数和行数，确认存在真实修复，不用固定规模代替难度判断；
 5. **privacy**：目标测试只存在 `evaluator/`，`env/` 和初始 Bug 基线中不存在；
-6. **files**：`<session_id>.jsonl` / `BUG_REPRO.md` / `collection.json` 齐全；
+6. **files**：`<session_id>.jsonl` / `project_summary.txt` / `collection.json` 齐全，记录目录不含 `BUG_REPRO.md`；
 7. **fields**：`collection.json` 必填字段齐全；
 8. **evidence**：`verify_result` 结构、URL、session_id 校验；
 9. **trajectory_guard**：正式修复轨迹守卫通过且 session_id 匹配；新 schema 还必须有通过的自动轨迹验收，bugfix 必须有绿灯后全量回归标记；
 10. **diagnosis**：diagnosis 题 `env` 与 `.base_snapshot` 零差异；
 11. **coverage**：`verify_cmds` 形态合法，且 `contract_coverage.json` 将 evaluator 每条断言映射到题面、`success_criteria` 和难度证据；
-12. **difficulty**：运行时机制、跨层触发和回退证据齐全；
+12. **difficulty**：运行时机制、跨层触发和题面覆盖证据齐全；已填写的可选回退证据必须有效；
 13. **domain**：项目与功能点未命中禁止类型。
-14. **repository**：远程无 `main`/干净基座；green/red 为 orphan 拓扑；G1/G2/R1 提交数、业务树、验收文件、G1 快照和 finalize 时序均一致。
+14. **repository**：远程无 `main`/干净基座；green/red 为 orphan 拓扑；G1/G2/R1 提交数、业务树、验收文件、G1 快照和 finalize 时序均一致；`BENZHI_README.md` 第一行简介正确且分支不含 `BUG_REPRO.md`。
 
-> 交付前 14 项必须全绿；其中 repository 是防止模型通过 Git 历史或其他 bug 分支抄到答案的最后硬门禁。
+> 交付前各项必须全绿；其中 repository 是防止模型通过 Git 历史或其他 bug 分支抄到答案的最后硬门禁。
 
-`post_qc.py` 默认用 3 个 worker 并发不同记录的本地 build/私测/回归，输出仍按记录名稳定排序；同一 repo 的远程分支元数据只查一次并复用。旧的已 finalize 记录没有 `pipeline_schema: 2` 时按旧证据兼容复核；新正式轨迹由脚本自动写入 schema 2，不得缺契约和自动验收文件。
+`post_qc.py` 默认用 3 个 worker 并发核对不同记录的留存证据，输出仍按记录名稳定排序；同一 repo 的远程分支元数据只查一次并复用。默认模式不会再次执行 Go build、私测或回归；只有证据缺失、指纹变化或排障时才使用 `--recheck-runtime`。旧的已 finalize 记录没有 `pipeline_schema: 2` 时按旧证据兼容复核；新正式轨迹由脚本自动写入 schema 2，不得缺契约和自动验收文件。
 
 ## 腾讯文档粘贴注意
 

@@ -25,6 +25,9 @@ class BatchPipelineTest(unittest.TestCase):
             path.mkdir(parents=True, exist_ok=True)
         (project / "status.json").write_text(json.dumps({"name": project.name, "repo": "demo-service"}))
         (project / "prompt.txt").write_text("当前项目就可以了，帮我修好这个问题。", encoding="utf-8")
+        (project / "project_summary.txt").write_text(
+            "基于 Go 实现的设备状态服务，提供设备状态写入与查询 API。\n", encoding="utf-8"
+        )
         (project / "collection.json").write_text(json.dumps({
             "bug_id": "demo-001", "task_type": "bugfix", "bug_category": "error异常错误",
             "user_query": "当前项目就可以了，帮我修好这个问题。",
@@ -45,6 +48,17 @@ class BatchPipelineTest(unittest.TestCase):
             self.assertEqual(first, input_fingerprint(project, root))
             (project / "prompt.txt").write_text("题面被改了", encoding="utf-8")
             self.assertNotEqual(first, input_fingerprint(project, root))
+
+    def test_fingerprint_can_use_immutable_bug_snapshot_after_model_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = self.make_project(root)
+            snapshot = project / ".base_snapshot"
+            shutil.copytree(project / "env", snapshot)
+            before = input_fingerprint(project, root)
+            (project / "env" / "main.go").write_text("package demo\nfunc Fixed() {}\n", encoding="utf-8")
+            self.assertNotEqual(before, input_fingerprint(project, root))
+            self.assertEqual(before, input_fingerprint(project, root, env_source=snapshot))
 
     def test_status_updates_are_additive_and_keep_attempt_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +142,42 @@ class BatchPipelineTest(unittest.TestCase):
             ), patch.object(batch_pipeline, "green", side_effect=lambda *unused: calls.append("green")):
                 batch_pipeline.model_phases(project, root, args)
             self.assertEqual(["red", "main", "green"], calls)
+
+    def test_record_pipelines_overlap_without_reordering_each_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = [root / "demo__001", root / "demo__002"]
+            events = []
+            event_lock = threading.Lock()
+            publish_barrier = threading.Barrier(2)
+
+            def note(project, stage):
+                with event_lock:
+                    events.append((project.name, stage))
+
+            def fake_publish(project, *_unused):
+                note(project, "publish")
+                publish_barrier.wait(timeout=1)
+
+            def fake_model(project, *_unused):
+                note(project, "model")
+                time.sleep(0.12 if project.name.endswith("001") else 0.01)
+
+            def fake_finalize(project, *_unused):
+                note(project, "finalize")
+
+            args = type("Args", (), {"workers": 2})()
+            with patch.object(batch_pipeline, "reconcile"), patch.object(
+                batch_pipeline, "publish", side_effect=fake_publish
+            ), patch.object(batch_pipeline, "model_phases", side_effect=fake_model), patch.object(
+                batch_pipeline, "finalize", side_effect=fake_finalize
+            ):
+                batch_pipeline.run_record_pipelines(projects, root, args)
+
+            for project in projects:
+                stages = [stage for name, stage in events if name == project.name]
+                self.assertEqual(["publish", "model", "finalize"], stages)
+            self.assertLess(events.index(("demo__002", "finalize")), events.index(("demo__001", "finalize")))
 
     @unittest.skipUnless(shutil.which("go"), "Go toolchain is required")
     def test_isolated_evaluator_compile_rejects_original_test_helper_dependency(self):
