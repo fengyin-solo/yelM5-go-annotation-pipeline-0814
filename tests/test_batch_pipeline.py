@@ -166,7 +166,7 @@ class BatchPipelineTest(unittest.TestCase):
             def fake_finalize(project, *_unused):
                 note(project, "finalize")
 
-            args = type("Args", (), {"workers": 2})()
+            args = type("Args", (), {"workers": 2, "model_workers": 2})()
             with patch.object(batch_pipeline, "reconcile"), patch.object(
                 batch_pipeline, "publish", side_effect=fake_publish
             ), patch.object(batch_pipeline, "model_phases", side_effect=fake_model), patch.object(
@@ -178,6 +178,29 @@ class BatchPipelineTest(unittest.TestCase):
                 stages = [stage for name, stage in events if name == project.name]
                 self.assertEqual(["publish", "model", "finalize"], stages)
             self.assertLess(events.index(("demo__002", "finalize")), events.index(("demo__001", "finalize")))
+
+    def test_default_model_workers_allow_eight_record_pipelines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = [root / f"demo__{index:03d}" for index in range(1, 9)]
+            active = 0
+            peak = 0
+            active_lock = threading.Lock()
+            barrier = threading.Barrier(8)
+
+            def fake_record_pipeline(*_unused):
+                nonlocal active, peak
+                with active_lock:
+                    active += 1
+                    peak = max(peak, active)
+                barrier.wait(timeout=2)
+                with active_lock:
+                    active -= 1
+
+            args = type("Args", (), {"workers": 3, "model_workers": 8})()
+            with patch.object(batch_pipeline, "record_pipeline", side_effect=fake_record_pipeline):
+                batch_pipeline.run_record_pipelines(projects, root, args)
+            self.assertEqual(8, peak)
 
     @unittest.skipUnless(shutil.which("go"), "Go toolchain is required")
     def test_isolated_evaluator_compile_rejects_original_test_helper_dependency(self):

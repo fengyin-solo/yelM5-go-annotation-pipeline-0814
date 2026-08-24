@@ -1,4 +1,5 @@
 import multiprocessing
+import inspect
 import sys
 import tempfile
 import time
@@ -21,11 +22,14 @@ def _hold_slot(lock_dir: str, slots: int, hold_seconds: float, queue) -> None:
 
 
 class SerialLockTest(unittest.TestCase):
-    def test_rejects_more_than_two_slots(self):
+    def test_accepts_eight_and_rejects_more_than_eight_slots(self):
         import serial_lock
 
-        with self.assertRaisesRegex(ValueError, "只能是 1 或 2"):
-            with serial_lock.test_model_lock(slots=3):
+        self.assertEqual(8, inspect.signature(serial_lock.test_model_lock).parameters["slots"].default)
+        with serial_lock.test_model_lock(slots=8):
+            pass
+        with self.assertRaisesRegex(ValueError, "只能是 1-8"):
+            with serial_lock.test_model_lock(slots=9):
                 pass
 
     def test_two_slots_admit_two_processes_and_delay_the_third(self):

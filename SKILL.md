@@ -159,11 +159,11 @@ python3 <skill>/scripts/batch_pipeline.py resume --root .
 python3 <skill>/scripts/batch_pipeline.py status --root .
 ```
 
-批处理默认用 `--workers 3` 推进不同记录、用 `--model-workers 2` 限制目标模型；遇到模型服务限流时可传 `--model-workers 1` 恢复模型全局串行。每条记录独立执行 G1 发布→红灯→正式轨迹→绿灯→finalize，不再等待整批记录到达同一阶段。同一 staging Git 仓库的写操作按仓库加跨进程锁，不同仓库可并行。
+批处理默认用 `--workers 3` 执行本地检查、用 `--model-workers 8` 限制目标模型；记录流水线线程数至少等于模型并发数，确保单批次可实际使用 8 个模型槽位。需要降低压力时可设为 1-7，其中 `--model-workers 1` 恢复模型全局串行。每条记录独立执行 G1 发布→红灯→正式轨迹→绿灯→finalize，不再等待整批记录到达同一阶段。同一 staging Git 仓库的写操作按仓库加跨进程锁，不同仓库可并行。
 
 - `status.json.pipeline` 是批次阶段、输入指纹和 `attempt_history` 的唯一事实源；原有 `state` 继续管理 workspace 生命周期。
 - 预检按批次中每个 `go.mod` 版本分别验证工具链切换、`-race`、测试二进制和 `LC_UUID` 能力，并发执行本地 Go 检查（默认 3 条），Docker 单独限流（默认 1 条）。`LC_UUID` 只在 evaluator 明确依赖它时硬失败；无此依赖时仍记录能力结果，由真实红灯断言到达门禁阻断工具链假红。只有输入指纹未变时才复用结果。
-- 红灯、正式轨迹、绿灯共用跨进程测试模型槽位，默认最多 2 路并发；同一记录仍严格按红灯→正式轨迹→绿灯执行。瞬时进程错误按上限重试；evaluator 编译、轨迹守卫和回归失败立即停止；同一 diagnosis/private_verify 失败签名第二次出现即熔断，修改输入后必须重新 preflight。
+- 红灯、正式轨迹、绿灯共用跨进程测试模型槽位，默认最多 8 路并发；同一记录仍严格按红灯→正式轨迹→绿灯执行。瞬时进程错误按上限重试；evaluator 编译、轨迹守卫和回归失败立即停止；同一 diagnosis/private_verify 失败签名第二次出现即熔断，修改输入后必须重新 preflight。
 - 同一记录的整条流水线有跨进程记录锁，避免两个批次重复更新其 `status.json` 和证据产物；Git 的 ensure/publish/finalize 另有按 staging repo 的跨进程锁，只锁 checkout/commit/push 临界区，不占用模型执行时间。
 - diagnosis 在 PreToolUse 就禁止 Edit/Write 和明确 Bash 写操作，跑后仍做零 diff 与「文件/符号/机制」根因语义验收。
 - 证据轨迹先本地生成，通过质量门禁后并发上传；Excel 和注册表各只在批末重建一次，并分别用跨进程写锁保护。
@@ -503,7 +503,7 @@ python3 <skill>/scripts/trajectory_guard.py preflight \
 - 失败的尝试留档为 `<project>/trajectory.failN.jsonl`。
 - 跑完后项目目录里的交付轨迹**文件名必须是 `<session_id>.jsonl`**（Claude Code 原始 session 文件，脚本自动取出）；脚本自动保证三处一致：文件名 == `collection.json` 的 `session_id` == 轨迹内的 `sessionId`。同名 `*.stream.jsonl` 是运行校验副本，不交付。
 - 跑轨迹期间尽量断网；脚本默认禁 `WebFetch` / `WebSearch` / `Bash(git clone *)` / `Bash(curl *)` / `Bash(wget *)`。
-- **测试模型限流，全局两路并发（红线）**：修复轨迹、红灯、绿灯都调同一个测试模型，`run_trajectory.py run` 与 `run_evidence_trajectories.py generate` 共用跨进程槽位，默认同一时刻最多运行两条模型任务；传 `--model-slots 1` 可恢复串行。
+- **测试模型限流，全局八路并发（红线）**：修复轨迹、红灯、绿灯都调同一个测试模型，`run_trajectory.py run` 与 `run_evidence_trajectories.py generate` 共用跨进程槽位，默认同一时刻最多运行八条模型任务；可通过 `--model-slots 1-8` 调整，设为 1 时恢复串行。
 - **跑前验收仿真（红线）**：preflight 必须删除原始 `*_test.go`，只注入 evaluator 后编译全部包，禁止 evaluator 依赖原项目测试 helper；diagnosis 还必须用 `gold_root_cause` 通过与正式轨迹相同的文件/符号/机制验收器。任一失败都不得调用目标模型。
 - **确定性失败熔断（红线）**：evaluator 编译失败、轨迹守卫命中和全量回归失败不得自动重跑；同一输入指纹下相同 diagnosis 或 private test 失败第二次出现即停止。修改 prompt、evaluator、collection 或验收契约后必须重新 preflight，不能沿用旧输入继续 retry。
 
@@ -674,9 +674,9 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 - **绿灯达标（仅 bugfix）**：结论含「已修复」且不含「未修复」；除脚本预先注入的 `evaluator/` 测试外，验证环境零改动。不达标则回滚重跑第 7 步并重新质检。
 - 每条证据最多自动重试 3 次；每次重试前从基线 / 修复后 `env/` 重新 rsync 验证环境。
 
-### 全局两路并发（红线）
+### 全局八路并发（红线）
 
-red / green / 修复轨迹共用跨进程模型槽位，默认全局最多同时运行 2 路。`batch_pipeline.py` 默认传 `--model-workers 2`；`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 默认使用 `--model-slots 2`，槽位文件位于 `~/.codex/go-annotation-pipeline/model-slots/`，等待超时仍由 `--lock-timeout` 控制。需要规避服务限流时统一设为 1，恢复全局串行。
+red / green / 修复轨迹共用跨进程模型槽位，默认全局最多同时运行 8 路。`batch_pipeline.py` 默认传 `--model-workers 8`；`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 默认使用 `--model-slots 8`，槽位文件位于 `~/.codex/go-annotation-pipeline/model-slots/`，等待超时仍由 `--lock-timeout` 控制。参数可设为 1-8；不同调用方并行运行时必须使用相同槽位数，设为 1 时恢复全局串行。
 
 同一记录内部必须保持 G1 发布→红灯→正式轨迹→绿灯→G2/R1 finalize 顺序。不同记录独立推进并使用各自隔离工作区；同仓库的 Git 写临界区通过仓库锁串行，不同仓库的 Git 写可并行。并发不得删除、抽样或降级任何门禁。
 

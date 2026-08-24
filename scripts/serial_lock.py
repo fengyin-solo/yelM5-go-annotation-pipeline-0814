@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """测试模型调用全局并发槽位。
 
-red / green / 修复轨迹都调用同一个限流测试模型，默认全局最多并发 2 路。
+red / green / 修复轨迹都调用同一个限流测试模型，默认全局最多并发 8 路。
 槽位锁放在 ~/.codex/go-annotation-pipeline/model-slots/，跨批次、跨项目生效。
 同时对旧 test_model.lock 持有共享锁，使新版进程会等待仍在运行的旧版排他锁。
 
@@ -23,14 +23,14 @@ SLOT_DIR = LOCK_DIR / "model-slots"
 
 
 @contextmanager
-def test_model_lock(timeout: int | None = 0, slots: int = 2):
+def test_model_lock(timeout: int | None = 0, slots: int = 8):
     """获取一个测试模型全局并发槽位。
 
     timeout=0 或 None 表示一直等待；>0 表示最多等待该秒数。所有调用方
-    必须使用相同的 slots；批处理默认传 2。slots=1 可恢复串行模式。
+    必须使用相同的 slots；批处理默认传 8。slots=1 可恢复串行模式。
     """
-    if slots not in (1, 2):
-        raise ValueError("测试模型并发槽位数只能是 1 或 2")
+    if not 1 <= slots <= 8:
+        raise ValueError("测试模型并发槽位数只能是 1-8")
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     SLOT_DIR.mkdir(parents=True, exist_ok=True)
     legacy_fh = open(LOCK_FILE, "a+")

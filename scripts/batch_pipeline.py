@@ -322,7 +322,7 @@ def record_pipeline(project: Path, root: Path, args) -> None:
 
 def run_record_pipelines(projects: list[Path], root: Path, args) -> None:
     failures = []
-    workers = max(1, min(args.workers, len(projects)))
+    workers = max(1, min(max(args.workers, args.model_workers), len(projects)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batch-record") as pool:
         futures = {pool.submit(record_pipeline, project, root, args): project for project in projects}
         for future in as_completed(futures):
@@ -425,8 +425,8 @@ def parse_args():
         command_parser.add_argument("--workers", type=int, default=3)
         command_parser.add_argument("--docker-workers", type=int, default=1)
         command_parser.add_argument("--upload-workers", type=int, default=3)
-        command_parser.add_argument("--model-workers", type=int, choices=(1, 2), default=2,
-                                    help="目标模型并发数；默认 2，设为 1 可恢复串行")
+        command_parser.add_argument("--model-workers", type=int, choices=range(1, 9), default=8,
+                                    help="目标模型并发数；默认 8，可设为 1-8")
         command_parser.add_argument("--calibration-runs", type=int, default=20)
         command_parser.add_argument("--timeout", type=int, default=3600)
         command_parser.add_argument("--model-timeout", type=int, default=1800)

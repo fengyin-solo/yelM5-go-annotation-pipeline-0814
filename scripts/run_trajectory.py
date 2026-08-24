@@ -693,8 +693,8 @@ def main():
     c.add_argument("--evaluator", help="私有测试目录；缺省为 <project>/evaluator")
     c.add_argument("--g1-manifest", help="G1 模型快照清单；缺省为 <project>/_delivery/g1_snapshot.json")
     c.add_argument("--lock-timeout", type=int, default=0, help="全局模型槽位等待秒数；0 表示一直等")
-    c.add_argument("--model-slots", type=int, choices=(1, 2), default=2,
-                   help="跨批次目标模型最大并发数；默认 2")
+    c.add_argument("--model-slots", type=int, choices=range(1, 9), default=8,
+                   help="跨批次目标模型最大并发数；默认 8，可设为 1-8")
     c.set_defaults(func=cmd_run)
 
     c = sub.add_parser("check")

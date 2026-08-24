@@ -27,7 +27,7 @@ stream-json；stream 捕获另存为 *.stream.jsonl 仅供排查。
   不满足 → 说明该修复轨迹实际无效，回滚重跑第 7 步修复轨迹并重新质检。
   注意：绿灯证明的是测试模型的修复成果，不是 _gold；因此必须在修复轨迹 + 质检之后执行。
 
-限流：red / green / 修复轨迹共用跨进程并发槽位，默认最多同时运行 2 路。
+限流：red / green / 修复轨迹共用跨进程并发槽位，默认最多同时运行 8 路。
 
 回填：上传后把下面 JSON 写入 collection.json 的 verify_result 字段：
   bugfix    -> {"pre_fix": {...red...}, "post_fix": {...green...}}
@@ -713,8 +713,8 @@ def main():
     c.add_argument("--cookie", help="COS 上传 cookie")
     c.add_argument("--skip-upload", action="store_true")
     c.add_argument("--lock-timeout", type=int, default=0, help="全局模型槽位等待秒数；0 表示一直等")
-    c.add_argument("--model-slots", type=int, choices=(1, 2), default=2,
-                   help="跨批次目标模型最大并发数；默认 2")
+    c.add_argument("--model-slots", type=int, choices=range(1, 9), default=8,
+                   help="跨批次目标模型最大并发数；默认 8，可设为 1-8")
     c.set_defaults(func=cmd_generate)
 
     c = sub.add_parser("validate", help="校验已有 verify_result（结构/URL 可访问/session_id 匹配）")
