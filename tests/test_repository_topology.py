@@ -94,7 +94,7 @@ class RepositoryTopologyTest(unittest.TestCase):
             self.assertTrue(ok, message)
             self.assertNotEqual(0, self.run_git(repo, "merge-base", "bug001_green", "bug001_red", check=False).returncode)
 
-    def test_diagnosis_single_green_passes_repository_qc_without_bug_repro(self):
+    def test_diagnosis_single_red_passes_repository_qc_without_bug_repro(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "_repos" / "demo"
@@ -110,7 +110,7 @@ class RepositoryTopologyTest(unittest.TestCase):
 
             summary = "基于 Go 实现的设备状态诊断 CLI 工具，定位设备状态异常与事件链路。"
             (project / "project_summary.txt").write_text(summary + "\n", encoding="utf-8")
-            self.run_git(repo, "checkout", "--orphan", "bug001_green")
+            self.run_git(repo, "checkout", "--orphan", "bug001_red")
             (repo / "go.mod").write_text("module example.com/demo\n\ngo 1.22\n", encoding="utf-8")
             (repo / "service.go").write_text("package demo\n\nfunc Value() int { return 1 }\n", encoding="utf-8")
             (repo / "BENZHI_README.md").write_text(summary + "\n\n# demo\n", encoding="utf-8")
@@ -118,8 +118,8 @@ class RepositoryTopologyTest(unittest.TestCase):
             self.run_git(repo, "commit", "-m", "G1")
             g1 = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
             manifest = project / "_delivery" / "g1_snapshot.json"
-            write_source_manifest(repo, manifest, commit=g1, branch="bug001_green")
-            self.run_git(repo, "push", "origin", "bug001_green")
+            write_source_manifest(repo, manifest, commit=g1, branch="bug001_red")
+            self.run_git(repo, "push", "origin", "bug001_red")
 
             evidence = project / "_evidence"
             evidence.mkdir()
@@ -129,21 +129,69 @@ class RepositoryTopologyTest(unittest.TestCase):
             }), encoding="utf-8")
             (evidence / "repository_delivery.json").write_text(json.dumps({
                 "state": "g1_published",
-                "repo_url": "https://github.com/example/demo/tree/bug001_green",
-                "green_branch": "bug001_green",
+                "task_type": "diagnosis",
+                "repo_url": "https://github.com/example/demo/tree/bug001_red",
+                "green_branch": "",
                 "red_branch": "bug001_red",
                 "g1_commit": g1,
             }), encoding="utf-8")
             collection = {
-                "repo_url": "https://github.com/example/demo/tree/bug001_green",
+                "repo_url": "https://github.com/example/demo/tree/bug001_red",
                 "session_id": "sid",
             }
 
             ok, message = repository_delivery_ok(project, collection, "diagnosis")
             self.assertTrue(ok, message)
+            self.assertNotEqual(0, self.run_git(repo, "rev-parse", "--verify", "bug001_green", check=False).returncode)
             tree = self.run_git(repo, "ls-tree", "-r", "--name-only", g1).stdout.splitlines()
             self.assertFalse(any(Path(name).name.lower() == "bug_repro.md" for name in tree))
             self.assertEqual(summary, self.run_git(repo, "show", f"{g1}:BENZHI_README.md").stdout.splitlines()[0])
+
+    def test_publish_diagnosis_creates_only_red_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "_repos" / "demo"
+            project = root / "2026-08-23" / "demo__010"
+            env = project / "env"
+            evaluator = project / "evaluator"
+            remote = root / "remote.git"
+            env.mkdir(parents=True)
+            evaluator.mkdir()
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.run_git(repo, "init")
+            self.run_git(repo, "config", "user.name", "QC Test")
+            self.run_git(repo, "config", "user.email", "qc@example.com")
+            self.run_git(repo, "remote", "add", "origin", str(remote))
+            (env / "go.mod").write_text("module example.com/demo\n\ngo 1.22\n", encoding="utf-8")
+            (env / "service.go").write_text("package demo\n\nfunc Value() int { return 1 }\n", encoding="utf-8")
+            (evaluator / "target_test.go").write_text(
+                "package demo\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) {}\n", encoding="utf-8"
+            )
+            (project / "project_summary.txt").write_text(
+                "基于 Go 实现的设备诊断 CLI，定位设备状态异常。\n", encoding="utf-8"
+            )
+            (project / "collection.json").write_text(json.dumps({
+                "bug_id": "demo-010", "task_type": "diagnosis",
+                "verify_cmds": "go test ./internal/demo -run '^TestValue$' -count=1",
+            }), encoding="utf-8")
+            context = {
+                "github": {"username": "local", "token": "unused"},
+                "gitAuthor": {"name": "QC Test", "email": "qc@example.com"},
+            }
+            args = SimpleNamespace(
+                root=str(root), repo_name="demo", project="demo__010", date="2026-08-23",
+                bug_id="demo-010", module_path=None,
+            )
+            with patch.object(github_project, "load_context", return_value=context):
+                github_project.cmd_publish(args)
+
+            self.assertEqual("1", self.run_git(repo, "rev-list", "--count", "bug010_red").stdout.strip())
+            self.assertNotEqual(0, self.run_git(repo, "rev-parse", "--verify", "bug010_green", check=False).returncode)
+            metadata = json.loads((project / "_evidence" / "repository_delivery.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["repo_url"].endswith("/tree/bug010_red"), metadata["repo_url"])
+            self.assertEqual("", metadata["green_branch"])
+            self.assertEqual("bug010_red", metadata["red_branch"])
 
     def test_publish_and_finalize_commands_use_orphan_topology(self):
         with tempfile.TemporaryDirectory() as tmp:

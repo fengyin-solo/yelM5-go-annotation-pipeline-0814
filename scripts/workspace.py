@@ -43,6 +43,7 @@ from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
 
+from bug_identity import bug_id_for_project
 from project_summary import validate_project_summary
 from resource_lock import lock_name, resource_lock
 
@@ -77,9 +78,9 @@ def normalize(repo: str) -> str:
 
 
 def slugify(name: str) -> str:
-    """本地项目名规范化为文件夹安全 slug（小写，保留 - _ .，其余转 -）。"""
+    """本地项目名规范化为文件夹安全名称，并保留 Unicode 目录标识。"""
     s = (name or "").strip().lower()
-    s = re.sub(r"[^a-z0-9_.-]+", "-", s)
+    s = re.sub(r"[^\w.【】()-]+", "-", s, flags=re.UNICODE)
     s = s.strip("._-")
     return s or "local-project"
 
@@ -193,7 +194,7 @@ def cmd_new_project(args):
             "repo": key,
             "clone_url": args.url or f"https://github.com/{key}",
             "state": "candidate",
-            "bug_id": None,
+            "bug_id": bug_id_for_project(proj.name),
             "base_commit": None,
             "fix_commits": [],
             "analysis": {},
@@ -247,7 +248,7 @@ def cmd_new_project(args):
                 "repo": name,
                 "record": rec,
                 "state": "candidate",
-                "bug_id": None,
+                "bug_id": bug_id_for_project(proj_name),
                 "base_commit": None,
                 "fix_commits": [],
                 "analysis": {},

@@ -5,8 +5,9 @@ GitHub 凭据/作者一律读取 pg-code 的 `~/.codex/pg-code/github-context.js
 配置或 shell 环境。安全规则：日志和输出可以出现账号/作者，但禁止输出 token。
 
 分支模型（一个 repo 最多 30 条记录）：
-    bug<record>_green  G1 bug 单提交 -> G2 模型修复+测试
-    bug<record>_red    R1 bug 代码+同一测试（orphan 单提交）
+    bugfix:    bug<record>_green  G1 bug 单提交 -> G2 模型修复+测试
+               bug<record>_red    R1 bug 代码+同一测试（orphan 单提交）
+    diagnosis: bug<record>_red    bug 代码 orphan 单提交，不创建 green
 
 本地 `_gold/` 只用于红绿校准、难度检查和回归验证，不创建远程分支。
 每个 bug 的 green/red 都独立生根，不得从 main 或其他 bug 分支派生。
@@ -503,6 +504,9 @@ def _cmd_publish_unlocked(args):
     auth_env = git_auth_env(remote_url, username, token)
     identity_env = git_identity_env(auth_env, author_name, author_email)
 
+    task_type = (collection_data.get("task_type") or "bugfix").strip().lower()
+    if task_type not in {"bugfix", "diagnosis"}:
+        raise RuntimeError("collection.json.task_type 必须是 bugfix 或 diagnosis")
     record = proj_name.rsplit("__", 1)[-1] if "__" in proj_name else "001"
     green_branch, red_branch = delivery_branches(record)
     forbidden = [name for name in _remote_branches(repo) if not re.fullmatch(r"bug\d{3}_(?:green|red)", name)]
@@ -513,7 +517,8 @@ def _cmd_publish_unlocked(args):
             f"交付分支已存在: {green_branch}/{red_branch}；拒绝覆盖可审计历史"
         )
 
-    run_git(repo, "checkout", "--orphan", green_branch)
+    delivery_branch = red_branch if task_type == "diagnosis" else green_branch
+    run_git(repo, "checkout", "--orphan", delivery_branch)
     clear_worktree(repo)
     sync_bug_source(proj / "env", repo)
     _assert_no_symlinks(repo)
@@ -522,19 +527,20 @@ def _cmd_publish_unlocked(args):
     run_git(repo, "add", "-A", "--", ".")
     run_git(repo, "commit", "-m", f"bug: {bug_id}", env=identity_env)
     g1_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
-    if run_git(repo, "rev-list", "--count", green_branch).stdout.strip() != "1":
-        raise RuntimeError("G1 green 分支必须为 orphan 单提交")
+    if run_git(repo, "rev-list", "--count", delivery_branch).stdout.strip() != "1":
+        raise RuntimeError(f"{delivery_branch} 必须为 orphan 单提交")
     _assert_no_tests(repo, g1_sha)
     manifest_path = proj / "_delivery" / "g1_snapshot.json"
-    write_source_manifest(repo, manifest_path, commit=g1_sha, branch=green_branch)
-    run_git(repo, "push", "-u", DEFAULT_REMOTE, green_branch, env=identity_env)
-    repo_url = f"{html}/tree/{green_branch}"
+    write_source_manifest(repo, manifest_path, commit=g1_sha, branch=delivery_branch)
+    run_git(repo, "push", "-u", DEFAULT_REMOTE, delivery_branch, env=identity_env)
+    repo_url = f"{html}/tree/{delivery_branch}"
 
     _write_delivery_metadata(proj, {
         "schema": 1,
         "state": "g1_published",
+        "task_type": task_type,
         "repo_url": repo_url,
-        "green_branch": green_branch,
+        "green_branch": green_branch if task_type == "bugfix" else "",
         "red_branch": red_branch,
         "g1_commit": g1_sha,
         "g1_manifest": str(manifest_path.relative_to(proj)),
@@ -542,7 +548,9 @@ def _cmd_publish_unlocked(args):
     print(json.dumps({
         "ok": True,
         "repoUrl": repo_url,
-        "greenBranch": green_branch,
+        "deliveryBranch": delivery_branch,
+        "greenBranch": green_branch if task_type == "bugfix" else "",
+        "redBranch": red_branch,
         "g1Commit": g1_sha,
         "g1Manifest": str(manifest_path),
     }, ensure_ascii=False))
@@ -577,7 +585,7 @@ def _cmd_finalize_unlocked(args):
     if not bug_id:
         raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
     if task_type == "diagnosis":
-        raise RuntimeError("diagnosis 题只交付 orphan G1，不创建 G2/R1")
+        raise RuntimeError("diagnosis 题只交付 orphan red 单提交，不执行 finalize")
     evaluator = proj / "evaluator"
     private_issues = private_test_issues(env_dir, evaluator, data.get("verify_cmds") or "")
     if private_issues:

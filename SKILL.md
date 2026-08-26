@@ -56,7 +56,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 
 1. **选题全部用自己的 0-1 生成项目**，不再去 GitHub 找题。
 2. **同一个 repo 最多 30 条数据**，每条一个不同 bug；同一个 bug 只能出 bugfix / diagnosis **二选一**。用户要求超过 30 条时，必须按每仓最多 30 条拆成多个不同的 0-1 项目和 GitHub 仓库，仓库数为 `ceil(总条数 / 30)`。
-3. **repo_url = `bug<record>_green` 分支地址**。跑轨迹前 green 只有 orphan 单提交 G1（Bug 代码、零测试资产）；收题后才在 green 追加 G2（模型修复+验收测试），并创建无共同祖先的 orphan `bug<record>_red` 单提交 R1（G1 业务树+同一测试）。
+3. **repo_url 按 task_type 取分支**：bugfix 填 `bug<record>_green`，其 green 从 G1 追加 G2，并配套 orphan red R1；diagnosis 只创建 orphan `bug<record>_red` 单提交，`repo_url` 直接填该 red 地址，禁止创建 green。
 4. GitHub 去重身份**优先用 GitHub 地址，其次用本地路径**。
 5. 交付只提交 GitHub `repo_url` 分支地址；不再提交修复 commit 字段，不打 zip、不截图。
 6. Dockerfile 要支持 arm64/amd64，但本流程**实际只验证当前机器平台**。
@@ -67,6 +67,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。文件数和增删行数只记录为辅助信息，不作为通用硬门禁。
 12. **禁止用规模冒充难度**：纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误通常不合格；但是否合格以真实定位难度、故障传播和测试证据判断，不要求人为扩写到固定文件数或行数。
 13. **禁止项目/功能点门禁优先于埋错和难度设计**：查账账务与订单类为最高优先级禁区，完整清单见 [references/forbidden-domains.md](references/forbidden-domains.md)。项目总体允许不代表每个功能点都允许；任一单条功能点命中禁区就立即换题，不得先埋错再靠改写 `user_query` 规避。
+14. **`bug_id` 固定为记录目录主体 + `-` + 三位 record**：例如 `16-exam-system【10】__001` 对应 `16-exam-system【10】-001`，保留目录名原始字符。
 
 ## 流程总览（编号与下文章节一一对应）
 
@@ -77,10 +78,10 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 5. **红绿校准** → 产出 verify_cmds、success_criteria、gold_root_cause
 6. **Docker 验证 + 项目简介 + 发布 GitHub**（跑轨迹前）→ 产出 repo_url
 7. **无测试跑修复轨迹**（Claude Code 干净 session）→ 脚本用系统临时隔离副本运行，副本中没有任何 `*_test.go`，模型只收到 `prompt.txt` 原文
-8. **轨迹质检四查** → `cheat/suspect/clean` 防作弊审计 → 私有绿灯验收 → `finalize` 生成 G2/R1
+8. **轨迹质检四查** → `cheat/suspect/clean` 防作弊审计；仅 bugfix 继续私有绿灯并 `finalize` 生成 G2/R1
 9. **填收集表 + 上传轨迹 + 收尾登记** → 产出 collection
 
-> 「附:红/绿证据轨迹」分两个阶段穿插执行：**红灯在第 6→7 步之间**；**绿灯在第 8 步四查通过后、8.1 finalize 之前**。G2/R1 在 finalize 之前不得存在。
+> 「附:红/绿证据轨迹」中红灯在第 6→7 步之间；仅 bugfix 在第 8 步四查通过后、8.1 finalize 之前跑绿灯。G2/R1 在 finalize 之前不得存在。
 
 ## 工作区与目录约定（本期根目录 = 调用时的 cwd）
 
@@ -238,11 +239,12 @@ python3 <skill>/scripts/github_project.py ensure \
 GitHub 分支模型：
 
 ```text
-bug<record>_green       G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
-bug<record>_red         R1 orphan 单提交（G1 业务树+与 G2 完全相同的验收测试）
+bugfix:    bug<record>_green  G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
+           bug<record>_red    R1 orphan 单提交（G1 业务树+与 G2 完全相同的验收测试）
+diagnosis: bug<record>_red    orphan Bug 单提交 -> repo_url（不创建 green）
 ```
 
-每对 green/red 无共同祖先；不同 bug 之间也无共同祖先。当前 Codex 的正确修复只保存在本地 `_gold/<project>/`，不创建或推送远程 gold 分支。
+bugfix 的每对 green/red 无共同祖先；不同 bug 之间也无共同祖先。当前 Codex 的正确修复只保存在本地 `_gold/<project>/`，不创建或推送远程 gold 分支。
 
 > 旧仓库只要已推送 `main`、干净基座或旧 `bug-*` 分支，就不得继续用于新数据。`publish` 会拒绝这类远程；必须换新的 0-1 项目和 GitHub 仓库，不得删历史后伪装迁移。
 
@@ -418,7 +420,7 @@ python3 <skill>/scripts/check_prompt_duplicates.py --root .
 
 ## 第 6 步：Docker 验证 + 项目简介 + 发布 GitHub（跑轨迹前）
 
-> 必须在跑轨迹前发布 orphan `bug<record>_green` G1：恰好一个无父提交，含 Bug 代码且无任何测试资产。此时 G2 和 R1 绝对不得存在。
+> 必须在跑轨迹前发布无测试资产的 orphan Bug 单提交：bugfix 发布到 `bug<record>_green`，diagnosis 发布到且只发布到 `bug<record>_red`。bugfix 此时 G2 和 R1 绝对不得存在。
 
 ### 6.1 Docker 本机验证
 
@@ -450,11 +452,11 @@ python3 <skill>/scripts/github_project.py publish \
 脚本会：
 
 - 先硬性检查 `evaluator/` 中的目标测试不存在于 `env/`；
-- 用 `git checkout --orphan` 创建 `bug<record>_green`，把排除所有 `*_test.go` 的 `env/` 与交付文件写成 G1 单提交；
+- 用 `git checkout --orphan` 创建交付分支，把排除所有 `*_test.go` 的 `env/` 与交付文件写成单提交；bugfix 使用 `bug<record>_green`，diagnosis 只使用 `bug<record>_red`；
 - **强制校验** `benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 均在仓库根目录；若旧版在模块子目录留下同名副本，脚本会清理后再发布；
 - **强制校验** `BENZHI_README.md` 第一行与 `project_summary.txt` 一致，且所有交付分支都不含 `BUG_REPRO.md`；
 - 写入 `<project>/_delivery/g1_snapshot.json`，记录模型可见文件的 SHA-256；`run_trajectory.py` 必须逐文件匹配该清单才能开跑；
-- 输出 green `repoUrl`（填 `repo_url`）；本地 `_gold/` 不提交到 GitHub。
+- 输出对应交付分支的 `repoUrl`（填 `repo_url`）；本地 `_gold/` 不提交到 GitHub。
 
 ## 第 7 步：跑轨迹
 
@@ -557,7 +559,7 @@ python3 <skill>/scripts/github_project.py finalize \
 - 硬校验 green 恰好两个提交、red 恰好一个提交、两分支无共同祖先、G1/R1 非测试文件逐 blob 一致、G2/R1 验收文件逐 blob 一致；
 - 写入 `_evidence/repository_delivery.json`，绑定 G1/G2/R1 SHA 与本条轨迹 session_id。
 
-diagnosis 题不执行 finalize，只保留 orphan G1。`push-fix` 仅作旧命令兼容入口，新流程统一使用 `finalize`。
+diagnosis 题不执行 finalize，只保留 publish 创建的 orphan red 单提交，且不得出现 green。`push-fix` 仅作旧命令兼容入口，新流程统一使用 `finalize`。
 
 ## 第 9 步：填收集表 + 上传轨迹 + 收尾登记
 
@@ -581,7 +583,8 @@ python3 <skill>/scripts/collection_table.py sync --root .
 - `harness`：必须写生成轨迹的工具名 + 版本号，例如 `Claude Code CLI v2.1.233`；禁止只写 `Claude Code CLI` 或只写模型名。
 - `verify_cmds`：bugfix / diagnosis 都必填；必须与红灯证据轨迹实际执行的唯一 Bash 命令和最终回复【命令】逐字符一致，bugfix 还必须与绿灯的实际命令和最终回复逐字符一致。
 
-- `repo_url`：填 `bug<record>_green` 分支地址；bugfix 最终为 G1→G2，diagnosis 只有 G1。red 分支由同一 record 命名可确定导出，不另增收集表字段。
+- `bug_id`：严格填“记录目录主体-三位 record”，如 `16-exam-system【10】__001` 对应 `16-exam-system【10】-001`。
+- `repo_url`：bugfix 填 `bug<record>_green` 分支地址；diagnosis 填唯一的 `bug<record>_red` 分支地址。
 - `是否同步飞书`：**本技能不填写**，留空。
 - `做题人`、`创建人` 由用户本人填写；`质检结果`、`质检备注` 留给质检人。
 - **必填对照**：bugfix 必填 `verify_cmds` + `verify_result`（`pre_fix`+`post_fix`）；diagnosis 必填 `verify_cmds` + `gold_root_cause` + `verify_result`（仅 `pre_fix`）。
@@ -621,7 +624,7 @@ python3 <skill>/scripts/repo_registry.py register <repo|url> --source auto \
 python3 <skill>/scripts/repo_registry.py sync --root .
 ```
 
-3. 确认已就位：`<project>/<session_id>.jsonl`、`collection.json`、项目 xlsx、`_delivery/g1_snapshot.json`、`_evidence/repository_delivery.json`以及 GitHub green/red 分支。
+3. 确认已就位：`<project>/<session_id>.jsonl`、`collection.json`、项目 xlsx、`_delivery/g1_snapshot.json`、`_evidence/repository_delivery.json`以及 GitHub 交付分支（bugfix 为 green/red，diagnosis 仅 red）。
 
 ### 9.4 后置质检（交付前硬校验，交付前必跑）
 
@@ -644,7 +647,7 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 11. **coverage**：`verify_cmds` 形态合法，且 `contract_coverage.json` 将 evaluator 每条断言映射到题面、`success_criteria` 和难度证据；
 12. **difficulty**：运行时机制、跨层触发和题面覆盖证据齐全；已填写的可选回退证据必须有效；
 13. **domain**：项目与功能点未命中禁止类型。
-14. **repository**：远程无 `main`/干净基座；green/red 为 orphan 拓扑；G1/G2/R1 提交数、业务树、验收文件、G1 快照和 finalize 时序均一致；`BENZHI_README.md` 第一行简介正确且分支不含 `BUG_REPRO.md`。
+14. **repository**：远程无 `main`/干净基座；bugfix 校验 green/red orphan 拓扑及 G1/G2/R1，diagnosis 校验 red-only orphan 单提交且不存在 green；G1 快照、简介和 `BUG_REPRO.md` 禁令均一致。
 
 > 交付前各项必须全绿；其中 repository 是防止模型通过 Git 历史或其他 bug 分支抄到答案的最后硬门禁。
 
@@ -678,7 +681,7 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 
 red / green / 修复轨迹共用跨进程模型槽位，默认全局最多同时运行 8 路。`batch_pipeline.py` 默认传 `--model-workers 8`；`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 默认使用 `--model-slots 8`，槽位文件位于 `~/.codex/go-annotation-pipeline/model-slots/`，等待超时仍由 `--lock-timeout` 控制。参数可设为 1-8；不同调用方并行运行时必须使用相同槽位数，设为 1 时恢复全局串行。
 
-同一记录内部必须保持 G1 发布→红灯→正式轨迹→绿灯→G2/R1 finalize 顺序。不同记录独立推进并使用各自隔离工作区；同仓库的 Git 写临界区通过仓库锁串行，不同仓库的 Git 写可并行。并发不得删除、抽样或降级任何门禁。
+同一记录内部必须保持顺序：bugfix 为 G1 green 发布→红灯→正式轨迹→绿灯→G2/R1 finalize；diagnosis 为 red-only 发布→红灯→正式轨迹。不同记录独立推进并使用各自隔离工作区；同仓库的 Git 写临界区通过仓库锁串行，不同仓库的 Git 写可并行。并发不得删除、抽样或降级任何门禁。
 
 ### 生成并回填 verify_result
 

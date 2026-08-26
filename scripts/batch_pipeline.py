@@ -275,7 +275,7 @@ def green(project: Path, root: Path, args) -> None:
     data = collection(project)
     if data.get("task_type") == "diagnosis":
         mark(project, "green_passed", "not applicable for diagnosis")
-        mark(project, "finalized", "diagnosis delivers G1 only")
+        mark(project, "finalized", "diagnosis delivers red-only G1 snapshot")
         return
     if not stage_passed(project, "green_passed"):
         run_checked(command("run_evidence_trajectories.py", "generate", "--root", str(root),

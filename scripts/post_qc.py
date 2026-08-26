@@ -48,6 +48,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trajectory_guard import inject_evaluator, is_test_artifact, private_test_issues, source_manifest  # noqa: E402
 from batch_state import input_fingerprint  # noqa: E402
+from bug_identity import bug_id_for_project  # noqa: E402
 from project_summary import read_project_summary  # noqa: E402
 
 
@@ -314,12 +315,14 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
     repo_url = coll.get("repo_url") or ""
     match = re.match(r"https?://[^/]+/[^/]+/([^/]+)/tree/([^/?#]+)$", repo_url)
     if not match:
-        return False, "repo_url 必须是 green 分支地址"
+        return False, "repo_url 必须是对应 task_type 的交付分支地址"
     repo_name, branch = match.groups()
     record = proj.name.rsplit("__", 1)[-1]
     green, red = f"bug{record}_green", f"bug{record}_red"
-    if branch != green or meta.get("green_branch") != green or meta.get("red_branch") != red:
-        return False, f"分支命名不符合 {green}/{red}"
+    expected_branch = red if task_type == "diagnosis" else green
+    expected_green = "" if task_type == "diagnosis" else green
+    if branch != expected_branch or meta.get("green_branch", "") != expected_green or meta.get("red_branch") != red:
+        return False, f"分支命名不符合 task_type={task_type} 的交付规则"
     repo = proj.parents[1] / "_repos" / repo_name
     if not (repo / ".git").is_dir():
         return False, f"找不到本地 staging repo: {repo}"
@@ -339,19 +342,24 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
         if illegal:
             issues.append("远程存在非 orphan 交付命名分支: " + ", ".join(illegal))
 
-    if _git(repo, "rev-parse", "--verify", green, check=False).returncode != 0:
-        return False, f"缺少 green 分支 {green}"
-    green_count = int(_git(repo, "rev-list", "--count", green).stdout.strip())
-    g2 = _git(repo, "rev-parse", green).stdout.strip()
-    if remote_refs.get(green) != g2:
-        issues.append("repo_url 指向的远程 green 未同步到本地验收提交")
     if task_type == "diagnosis":
-        g1 = g2
-        if green_count != 1:
-            issues.append("diagnosis green 必须只有 G1 单提交")
-        if _git(repo, "rev-parse", "--verify", red, check=False).returncode == 0:
-            issues.append("diagnosis 不应创建 R1")
+        if _git(repo, "rev-parse", "--verify", green, check=False).returncode == 0:
+            issues.append("diagnosis 不应创建 green 分支")
+        if _git(repo, "rev-parse", "--verify", red, check=False).returncode != 0:
+            return False, f"缺少 diagnosis red 分支 {red}"
+        g1 = _git(repo, "rev-parse", red).stdout.strip()
+        g2 = g1
+        if remote_refs.get(red) != g1:
+            issues.append("repo_url 指向的远程 red 未同步到本地提交")
+        if _git(repo, "rev-list", "--count", red).stdout.strip() != "1":
+            issues.append("diagnosis red 必须为 orphan 单提交")
     else:
+        if _git(repo, "rev-parse", "--verify", green, check=False).returncode != 0:
+            return False, f"缺少 green 分支 {green}"
+        green_count = int(_git(repo, "rev-list", "--count", green).stdout.strip())
+        g2 = _git(repo, "rev-parse", green).stdout.strip()
+        if remote_refs.get(green) != g2:
+            issues.append("repo_url 指向的远程 green 未同步到本地验收提交")
         if green_count != 2:
             issues.append("bugfix green 必须恰好是 G1 -> G2 两个提交")
         g1 = _git(repo, "rev-parse", f"{green}^").stdout.strip() if green_count >= 2 else ""
@@ -381,10 +389,10 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
         issues.append(str(exc))
     readme = _git(repo, "show", f"{g2}:BENZHI_README.md", check=False)
     if readme.returncode != 0:
-        issues.append("最终 green 缺少 BENZHI_README.md")
+        issues.append(f"最终 {expected_branch} 缺少 BENZHI_README.md")
     elif not readme.stdout.splitlines() or readme.stdout.splitlines()[0].strip() != expected_summary:
         issues.append("BENZHI_README.md 第一行与 project_summary.txt 不一致")
-    delivery_revisions = [(green, g2)]
+    delivery_revisions = [(expected_branch, g2)]
     if task_type == "bugfix" and _git(repo, "rev-parse", "--verify", red, check=False).returncode == 0:
         delivery_revisions.append((red, _git(repo, "rev-parse", red).stdout.strip()))
     for branch, revision in delivery_revisions:
@@ -429,7 +437,8 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
                     issues.append("G2/R1 在正式轨迹完成前已创建")
             except Exception as exc:
                 issues.append(f"无法核对轨迹/finalize 时序: {exc}")
-    return not issues, "；".join(issues) or "orphan 拓扑、G1/G2/R1 文件树与快照均通过"
+    topology = "diagnosis red-only orphan 拓扑与 G1 快照均通过" if task_type == "diagnosis" else "orphan 拓扑、G1/G2/R1 文件树与快照均通过"
+    return not issues, "；".join(issues) or topology
 
 
 def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
@@ -596,6 +605,9 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         miss.append("harness(缺工具版本号)")
     if not verify_cmds:
         miss.append("verify_cmds")
+    expected_bug_id = bug_id_for_project(proj.name)
+    if coll.get("bug_id") != expected_bug_id:
+        miss.append(f"bug_id(应为 {expected_bug_id})")
     if task_type == "diagnosis":
         if not coll.get("gold_root_cause"):
             miss.append("gold_root_cause")

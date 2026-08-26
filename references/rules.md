@@ -143,8 +143,8 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - 不得用 system prompt、append system prompt 或拼接用户题面的方式注入额外轨迹约束文字；模型只收到 `prompt.txt` 原文，防泄漏依靠环境隔离和轨迹审计。
 - 测试模型 workspace 必须来自已发布 G1 的单分支快照，且不能有 `.git` 历史、remote、commit SHA、补丁文件、gold 修复说明。
 - 测试模型 workspace 和 prompt 里不能暴露本技能：不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、技能名等标记。`BUG_REPRO.md` 已全面禁用，任何位置发现都应删除或拒绝交付。
-- 远程不得存在 `main`、干净基座或 gold 分支。每个 bug 的 `bug<record>_green` 与 `bug<record>_red` 都用 `--orphan` 独立生根；不同 bug 也不得有共同祖先。
-- 跑轨迹前 green 只有 G1 单提交。bugfix 收题后 green 为 G1→G2，red 为 R1 单提交；G1/R1 非测试树完全一致，G2/R1 验收文件完全一致。
+- 远程不得存在 `main`、干净基座或 gold 分支。bugfix 的 green/red 用 `--orphan` 独立生根；diagnosis 只允许 orphan red；不同 bug 不得有共同祖先。
+- 跑轨迹前 bugfix green 只有 G1 单提交；收题后 green 为 G1→G2、red 为 R1。diagnosis 始终只有 red 单提交且不得创建 green。
 - 绝不能把原始多分支 repo 交给模型；必须导出 G1 的模型可见快照，用 `g1_snapshot.json` 逐文件验证后再运行。
 - 轨迹质检发现模型 clone 上游 / WebFetch 上游源码按疑似作弊重跑。
 
@@ -203,16 +203,17 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 分支模型（无主分支/干净基座）：
 
 ```text
-bug<record>_green  G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
-bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
+bugfix:    bug<record>_green  G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
+           bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
+diagnosis: bug<record>_red    orphan Bug 单提交 -> repo_url（不创建 green）
 ```
 
-- 每个 repo 最多 30 条记录，每条 bugfix 一对 green/red orphan 分支；diagnosis 只有 green G1。
-- `repo_url` 填 `bug<record>_green` 分支地址。
+- 每个 repo 最多 30 条记录，每条 bugfix 一对 green/red orphan 分支；diagnosis 只有 red 单提交。
+- `repo_url`：bugfix 填 `bug<record>_green`；diagnosis 填 `bug<record>_red`。
 - green/red 交付分支必须包含根目录 Docker 交付文件，且不得包含 `BUG_REPRO.md`。
 - 每条记录必须有单行 `project_summary.txt`，包含 `Go`、明确项目类型和主要功能；发布后该句必须位于 `BENZHI_README.md` 第一行，`project_summary.txt` 本身不提交。
 - 交付不再打 zip、不再截图，只提交 GitHub `repo_url` 分支地址。
-- **`publish` 和 Docker 验证必须在跑轨迹前完成**；轨迹前只允许 G1。轨迹与私有绿灯通过后由 `finalize` 一次创建 G2/R1；禁止把 gold 修复内容混入任何远程分支。
+- **`publish` 和 Docker 验证必须在跑轨迹前完成**；bugfix 轨迹前只允许 green G1，轨迹与私有绿灯通过后由 `finalize` 创建 G2/R1；diagnosis 在 publish 后始终只有 red 单提交。禁止把 gold 修复内容混入任何远程分支。
 - GitHub 仓库用 `github_project.py ensure` 自动创建 **public** repo（审核方需要能访问）；用 `publish` 推送 Bug 分支并输出 `repoUrl`。
 - GitHub 凭据/作者从 `~/.codex/pg-code/github-context.json` 读取，禁止输出 token。
 
@@ -228,7 +229,7 @@ bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
 
 - 创建记录时通过 `workspace.py new-project --project-summary '<简介>'` 生成 `<project>/project_summary.txt`。
 - 简介必须只有一行，明确包含 `Go` 和项目类型（如 CLI、命令行工具、服务、API、系统或库），并概括主要功能。
-- 发布脚本把简介逐字写到根目录 `BENZHI_README.md` 第一行；后置质检直接读取最终 green 分支核对。
+- 发布脚本把简介逐字写到根目录 `BENZHI_README.md` 第一行；后置质检读取对应 task_type 的最终交付分支核对。
 - `project_summary.txt` 只作为记录元数据，不进入 `env/` 或 GitHub 交付分支。
 - 项目目录、源码、green/red 分支均禁止出现 `BUG_REPRO.md`；发布脚本会删除 staging 中的旧残留，post-QC 会拒绝仍含该文件的记录或分支。
 
