@@ -14,7 +14,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 |------|------|
 | sample_id | 纯数字，全局唯一；填前先查全表已占用编号 |
 | session id | 测试模型轨迹的 session uuid（jsonl 文件名） |
-| bug_id | 固定为记录目录主体 + `-` + 三位 record；如 `16-exam-system【10】__001` 对应 `16-exam-system【10】-001` |
+| bug_id | 固定为批次根目录名 + `-` + 记录目录末尾的三位 record；如根目录 `55-connection-pool【10】` 下的 `connection-pool-observability-service__001` 对应 `55-connection-pool【10】-001`，不得从 repo/仓库名派生 |
 | task_type | `bugfix` / `diagnosis`；同一个 bug 只能二选一，不得同时出两条 |
 | bug_category | 只允许以下取值（原样填写）：`concurrency并发问题` / `slice相关问题` / `error异常错误` / `nil相关问题` / `context相关问题` / `defer相关问题` / `其他问题`；优先前六类，确属其他才用 `其他问题` |
 | repo_url | bugfix 填 `bug<record>_green` 地址（最终 G1→G2，并配套 orphan red R1）；diagnosis 填唯一的 `bug<record>_red` 地址，且不得创建 green |

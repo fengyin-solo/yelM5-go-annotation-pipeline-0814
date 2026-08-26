@@ -187,7 +187,7 @@ def cmd_new(args):
         print(f"⚠️  已存在 {f}，不覆盖。用 write 更新。")
         sys.exit(1)
     template = {key: "" for key, _ in FIELDS}
-    template["bug_id"] = bug_id_for_project(p.name)
+    template["bug_id"] = bug_id_for_project(root, p.name)
     f.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"✅ 已生成 {f}")
 
@@ -204,9 +204,9 @@ def cmd_write(args):
     if unknown:
         print(f"⚠️  存在未知字段（会被忽略）: {sorted(unknown)}")
     clean = {key: data.get(key, "") for key, _ in FIELDS}
-    expected_bug_id = bug_id_for_project(p.name)
+    expected_bug_id = bug_id_for_project(root, p.name)
     if clean.get("bug_id") and clean["bug_id"] != expected_bug_id:
-        print(f"⚠️  bug_id 已按记录目录规则改为 {expected_bug_id}")
+        print(f"⚠️  bug_id 已按批次根目录名+记录序号规则改为 {expected_bug_id}")
     clean["bug_id"] = expected_bug_id
     # 是否同步飞书由甲方/录入方决定，本脚本默认不自动填写。
     if clean.get("sync_feishu") is None:

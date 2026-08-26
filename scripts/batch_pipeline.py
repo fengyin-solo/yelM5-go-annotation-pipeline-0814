@@ -48,7 +48,12 @@ def mark(project: Path, stage: str, detail: str = "") -> None:
 
 def require_unchanged_inputs(project: Path, root: Path) -> None:
     expected = load_json(project / "status.json").get("pipeline", {}).get("input_fingerprint")
-    actual = input_fingerprint(project, root)
+    base_snapshot = project / ".base_snapshot"
+    actual = input_fingerprint(
+        project,
+        root,
+        env_source=base_snapshot if base_snapshot.is_dir() else project / "env",
+    )
     if not expected or expected != actual:
         raise RuntimeError(
             "preflight inputs changed; rerun batch_pipeline.py preflight before consuming target-model time"

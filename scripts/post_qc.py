@@ -605,7 +605,7 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
         miss.append("harness(缺工具版本号)")
     if not verify_cmds:
         miss.append("verify_cmds")
-    expected_bug_id = bug_id_for_project(proj.name)
+    expected_bug_id = bug_id_for_project(proj.parents[1], proj.name)
     if coll.get("bug_id") != expected_bug_id:
         miss.append(f"bug_id(应为 {expected_bug_id})")
     if task_type == "diagnosis":

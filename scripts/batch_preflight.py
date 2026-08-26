@@ -267,7 +267,12 @@ def _functional_diff(env: Path, gold: Path) -> tuple[int, int]:
 
 def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
                       timeout: int = 1800, force: bool = False) -> dict:
-    fingerprint = input_fingerprint(project, root)
+    base_snapshot = project / ".base_snapshot"
+    fingerprint = input_fingerprint(
+        project,
+        root,
+        env_source=base_snapshot if base_snapshot.is_dir() else project / "env",
+    )
     evidence_path = project / "_evidence" / "preflight.json"
     if evidence_path.exists() and not force:
         cached = load_json(evidence_path)
@@ -328,8 +333,9 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
     )
     if task_type == "diagnosis":
         checks["diagnosis_acceptance_precheck"] = _diagnosis_acceptance_precheck(project)
+    red_source = base_snapshot if task_type == "bugfix" and base_snapshot.is_dir() else project / "env"
     checks["red_calibration"] = _run_calibration(
-        project / "env", project / "evaluator", verify_cmd, "red", env, calibration_runs, timeout
+        red_source, project / "evaluator", verify_cmd, "red", env, calibration_runs, timeout
     )
     checks["green_calibration"] = _run_calibration(
         gold, project / "evaluator", verify_cmd, "green", env, calibration_runs, timeout

@@ -67,7 +67,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。文件数和增删行数只记录为辅助信息，不作为通用硬门禁。
 12. **禁止用规模冒充难度**：纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误通常不合格；但是否合格以真实定位难度、故障传播和测试证据判断，不要求人为扩写到固定文件数或行数。
 13. **禁止项目/功能点门禁优先于埋错和难度设计**：查账账务与订单类为最高优先级禁区，完整清单见 [references/forbidden-domains.md](references/forbidden-domains.md)。项目总体允许不代表每个功能点都允许；任一单条功能点命中禁区就立即换题，不得先埋错再靠改写 `user_query` 规避。
-14. **`bug_id` 固定为记录目录主体 + `-` + 三位 record**：例如 `16-exam-system【10】__001` 对应 `16-exam-system【10】-001`，保留目录名原始字符。
+14. **`bug_id` 固定为批次根目录名 + `-` + 三位 record**：record 仅从记录目录末尾 `__NNN` 取值，前缀必须取 `--root` 指向目录的 basename，不得从 repo 名、GitHub 仓库名或记录目录主体派生。例如批次根目录为 `55-connection-pool【10】`、记录目录为 `connection-pool-observability-service__001` 时，`bug_id` 必须为 `55-connection-pool【10】-001`，保留批次根目录名的原始字符。
 
 ## 流程总览（编号与下文章节一一对应）
 
@@ -583,7 +583,7 @@ python3 <skill>/scripts/collection_table.py sync --root .
 - `harness`：必须写生成轨迹的工具名 + 版本号，例如 `Claude Code CLI v2.1.233`；禁止只写 `Claude Code CLI` 或只写模型名。
 - `verify_cmds`：bugfix / diagnosis 都必填；必须与红灯证据轨迹实际执行的唯一 Bash 命令和最终回复【命令】逐字符一致，bugfix 还必须与绿灯的实际命令和最终回复逐字符一致。
 
-- `bug_id`：严格填“记录目录主体-三位 record”，如 `16-exam-system【10】__001` 对应 `16-exam-system【10】-001`。
+- `bug_id`：严格填“批次根目录名-三位 record”；例如根目录 `55-connection-pool【10】` 下的 `connection-pool-observability-service__001` 对应 `55-connection-pool【10】-001`。
 - `repo_url`：bugfix 填 `bug<record>_green` 分支地址；diagnosis 填唯一的 `bug<record>_red` 分支地址。
 - `是否同步飞书`：**本技能不填写**，留空。
 - `做题人`、`创建人` 由用户本人填写；`质检结果`、`质检备注` 留给质检人。
