@@ -66,7 +66,10 @@ def reconcile(project: Path) -> None:
     data = collection(project)
     evidence = project / "_evidence"
     delivery = load_json(evidence / "repository_delivery.json")
-    if delivery.get("state") in {"g1_published", "finalized"} and (project / "_delivery" / "g1_snapshot.json").exists():
+    if delivery.get("state") == "finalized" and delivery.get("repo_url") and data.get("repo_url") != delivery["repo_url"]:
+        data["repo_url"] = delivery["repo_url"]
+        atomic_json(project / "collection.json", data)
+    if delivery.get("state") in {"g1_prepared", "g1_published", "finalized"} and (project / "_delivery" / "g1_snapshot.json").exists():
         if not stage_passed(project, "g1_published"):
             mark(project, "g1_published", "reconciled from repository_delivery.json")
     red = load_json(evidence / "red_result.json")
@@ -88,8 +91,7 @@ def reconcile(project: Path) -> None:
               and load_json(evidence / "green_regression.json").get("result") == "passed"
               and not stage_passed(project, "green_passed")):
             mark(project, "green_passed", "reconciled from local green evidence")
-    if ((task_type == "diagnosis" and stage_passed(project, "main_accepted"))
-            or delivery.get("state") == "finalized"):
+    if delivery.get("state") == "finalized":
         if not stage_passed(project, "finalized"):
             mark(project, "finalized", "reconciled from delivery metadata")
     verify = data.get("verify_result")
@@ -281,7 +283,6 @@ def green(project: Path, root: Path, args) -> None:
     data = collection(project)
     if data.get("task_type") == "diagnosis":
         mark(project, "green_passed", "not applicable for diagnosis")
-        mark(project, "finalized", "diagnosis delivers red-only G1 snapshot")
         return
     if not stage_passed(project, "green_passed"):
         run_checked(command("run_evidence_trajectories.py", "generate", "--root", str(root),
@@ -294,14 +295,15 @@ def green(project: Path, root: Path, args) -> None:
 
 def finalize(project: Path, root: Path, args) -> None:
     data = collection(project)
-    if data.get("task_type") == "diagnosis":
-        return
     if not stage_passed(project, "finalized"):
         status = load_json(project / "status.json")
         repo = str(status.get("repo") or project.name.rsplit("__", 1)[0])
         run_checked(command("github_project.py", "finalize", "--root", str(root), "--repo-name", repo,
                             "--project", project.name, "--date", project.parent.name), cwd=root,
                     timeout=args.timeout)
+        delivery = load_json(project / "_evidence" / "repository_delivery.json")
+        data["repo_url"] = delivery.get("repo_url", data.get("repo_url", ""))
+        atomic_json(project / "collection.json", data)
         mark(project, "finalized")
 
 

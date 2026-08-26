@@ -99,9 +99,10 @@ class RepositoryTopologyTest(unittest.TestCase):
             root = Path(tmp)
             repo = root / "_repos" / "demo"
             project = root / "2026-08-23" / "demo__001"
+            evaluator = project / "evaluator"
             remote = root / "remote.git"
             repo.mkdir(parents=True)
-            project.mkdir(parents=True)
+            evaluator.mkdir(parents=True)
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
             self.run_git(repo, "init")
             self.run_git(repo, "config", "user.name", "QC Test")
@@ -114,6 +115,9 @@ class RepositoryTopologyTest(unittest.TestCase):
             (repo / "go.mod").write_text("module example.com/demo\n\ngo 1.22\n", encoding="utf-8")
             (repo / "service.go").write_text("package demo\n\nfunc Value() int { return 1 }\n", encoding="utf-8")
             (repo / "BENZHI_README.md").write_text(summary + "\n\n# demo\n", encoding="utf-8")
+            test_text = "package demo\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) {}\n"
+            (repo / "target_test.go").write_text(test_text, encoding="utf-8")
+            (evaluator / "target_test.go").write_text(test_text, encoding="utf-8")
             self.run_git(repo, "add", ".")
             self.run_git(repo, "commit", "-m", "G1")
             g1 = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -128,12 +132,16 @@ class RepositoryTopologyTest(unittest.TestCase):
                 "session_id": "sid", "completed_at": completed.isoformat(),
             }), encoding="utf-8")
             (evidence / "repository_delivery.json").write_text(json.dumps({
-                "state": "g1_published",
+                "state": "finalized",
                 "task_type": "diagnosis",
                 "repo_url": "https://github.com/example/demo/tree/bug001_red",
                 "green_branch": "",
                 "red_branch": "bug001_red",
                 "g1_commit": g1,
+                "r1_commit": g1,
+                "session_id": "sid",
+                "test_files": ["target_test.go"],
+                "finalized_at": datetime.now(timezone.utc).isoformat(),
             }), encoding="utf-8")
             collection = {
                 "repo_url": "https://github.com/example/demo/tree/bug001_red",
@@ -147,7 +155,20 @@ class RepositoryTopologyTest(unittest.TestCase):
             self.assertFalse(any(Path(name).name.lower() == "bug_repro.md" for name in tree))
             self.assertEqual(summary, self.run_git(repo, "show", f"{g1}:BENZHI_README.md").stdout.splitlines()[0])
 
-    def test_publish_diagnosis_creates_only_red_branch(self):
+            self.run_git(repo, "rm", "target_test.go")
+            self.run_git(repo, "commit", "--amend", "-m", "red without tests")
+            no_test_sha = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+            self.run_git(repo, "push", "--force", "origin", "bug001_red")
+            write_source_manifest(repo, manifest, commit=no_test_sha, branch="bug001_red")
+            metadata = json.loads((evidence / "repository_delivery.json").read_text(encoding="utf-8"))
+            metadata["g1_commit"] = no_test_sha
+            metadata["r1_commit"] = no_test_sha
+            (evidence / "repository_delivery.json").write_text(json.dumps(metadata), encoding="utf-8")
+            ok, message = repository_delivery_ok(project, collection, "diagnosis")
+            self.assertFalse(ok)
+            self.assertIn("diagnosis red 没有验收测试", message)
+
+    def test_diagnosis_finalize_adds_tests_then_first_pushes_single_red_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "_repos" / "demo"
@@ -188,10 +209,49 @@ class RepositoryTopologyTest(unittest.TestCase):
 
             self.assertEqual("1", self.run_git(repo, "rev-list", "--count", "bug010_red").stdout.strip())
             self.assertNotEqual(0, self.run_git(repo, "rev-parse", "--verify", "bug010_green", check=False).returncode)
+            prepared_files = self.run_git(repo, "ls-tree", "-r", "--name-only", "bug010_red").stdout.splitlines()
+            self.assertFalse(any(github_project.is_test_artifact(name) for name in prepared_files))
+            self.assertEqual("", self.run_git(repo, "ls-remote", "--heads", "origin", "bug010_red").stdout.strip())
             metadata = json.loads((project / "_evidence" / "repository_delivery.json").read_text(encoding="utf-8"))
-            self.assertTrue(metadata["repo_url"].endswith("/tree/bug010_red"), metadata["repo_url"])
+            self.assertEqual("g1_prepared", metadata["state"])
+            self.assertEqual("", metadata["repo_url"])
             self.assertEqual("", metadata["green_branch"])
             self.assertEqual("bug010_red", metadata["red_branch"])
+
+            collection = json.loads((project / "collection.json").read_text(encoding="utf-8"))
+            collection["session_id"] = "sid"
+            (project / "collection.json").write_text(json.dumps(collection), encoding="utf-8")
+            (project / "sid.jsonl").write_text("{}\n", encoding="utf-8")
+            evidence = project / "_evidence"
+            completed = datetime.now(timezone.utc) - timedelta(seconds=1)
+            (evidence / "trajectory_guard.json").write_text(json.dumps({
+                "result": "passed", "classification": "clean", "tests_visible": False,
+                "session_id": "sid", "completed_at": completed.isoformat(),
+            }), encoding="utf-8")
+            (evidence / "trajectory_acceptance.json").write_text(json.dumps({
+                "result": "passed", "session_id": "sid", "checks": {
+                    name: {"passed": True} for name in (
+                        "trajectory_analysis", "regression", "task_semantics", "diagnosis_root_cause"
+                    )
+                },
+            }), encoding="utf-8")
+            with patch.object(github_project, "load_context", return_value=context), patch.object(
+                github_project, "_write_delivery_metadata", side_effect=RuntimeError("simulated interruption")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                    github_project.cmd_finalize(args)
+            self.assertTrue(self.run_git(repo, "ls-remote", "--heads", "origin", "bug010_red").stdout.strip())
+            with patch.object(github_project, "load_context", return_value=context):
+                github_project.cmd_finalize(args)
+
+            self.assertEqual("1", self.run_git(repo, "rev-list", "--count", "bug010_red").stdout.strip())
+            final_files = self.run_git(repo, "ls-tree", "-r", "--name-only", "bug010_red").stdout.splitlines()
+            self.assertIn("target_test.go", final_files)
+            self.assertTrue(self.run_git(repo, "ls-remote", "--heads", "origin", "bug010_red").stdout.strip())
+            metadata = json.loads((evidence / "repository_delivery.json").read_text(encoding="utf-8"))
+            self.assertEqual("finalized", metadata["state"])
+            self.assertTrue(metadata["repo_url"].endswith("/tree/bug010_red"), metadata["repo_url"])
+            self.assertEqual(["target_test.go"], metadata["test_files"])
 
     def test_publish_and_finalize_commands_use_orphan_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,6 +321,7 @@ class RepositoryTopologyTest(unittest.TestCase):
                     )
                 },
             }), encoding="utf-8")
+            (project / "sid.jsonl").write_text("{}\n", encoding="utf-8")
             with patch.object(github_project, "load_context", return_value=context):
                 github_project.cmd_finalize(args)
 

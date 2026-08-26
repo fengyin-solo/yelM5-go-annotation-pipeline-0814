@@ -62,11 +62,11 @@
 
 ## 埋错复杂度红线（硬性，出题前必读）
 
-**难度以真实故障链为准，不以修复规模代替。** 核心缺陷必须涉及至少 1 个 Go 运行时机制，跨至少 2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。存在第二种耦合机制时应记录，但不要求每题强行叠加。
+**难度以真实故障链为准，不以修复规模代替。** 核心缺陷必须涉及至少 1 个 Go 运行时机制，跨至少 2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。bugfix 的 gold 另有至少 1 个功能 Go 文件、至少 5 行功能代码增删的最低有效改动门禁；存在第二种耦合机制时应记录，但不要求每题强行叠加。
 
 允许的运行时机制标签：`concurrency_sync`、`channel_lifecycle`、`context_lifecycle`、`error_retry`、`resource_lifecycle`、`transaction_lifecycle`、`typed_nil_dispatch`、`panic_recovery`、`shared_state_pollution`、`state_machine_idempotency`。
 
-bugfix 的 gold 必须包含真实功能代码修复。文件数和增删行数作为审查信息记录，统计不含 `_test.go`、README、Markdown/其他文档、注释和交付文件；不得靠改测试、拆文件、加注释或堆无效代码制造规模。
+bugfix 的 gold 必须包含真实功能代码修复，至少改动 1 个功能 Go 文件，功能代码增删总行数至少 5 行。统计不含 `_test.go`、README、Markdown/其他文档、注释和交付文件；达到最低值后，文件数和增删行数只作为审查信息记录，不得靠改测试、拆文件、加注释或堆无效代码制造规模。
 
 - 禁止把以下内容作为核心缺陷：纯索引/长度/offset/容量/边界计算，单字段映射、常量、比较符或条件分支，单个 `%v`/`%w`、nil 判断、状态转换漏项、序列化标签，以及单函数纯输入输出变换。扩大改动规模也不能让这类简单缺陷合格。
 - 根本修复若只是显而易见的局部常量、比较符或字段改动，通常淘汰；集中修复本身不是淘汰理由，关键看定位和故障传播难度。
@@ -93,7 +93,7 @@ bugfix 的 gold 必须包含真实功能代码修复。文件数和增删行数�
 
 ### 埋错自检清单（出题人逐项确认）
 
-- [ ] gold 修复包含真实功能代码变更，文件数和行数已记录且没有凑规模
+- [ ] gold 修复至少改动 1 个功能 Go 文件、功能代码增删总行数至少 5 行，且没有凑规模
 - [ ] 至少 1 个主运行时机制真实存在；填写的耦合机制均有代码和运行证据
 - [ ] `core_defect_review` 明确证明：故障链依赖运行时机制、调用顺序/生命周期和跨层状态传导；根本修复不是单点数据变换
 - [ ] `root_cause_locations` 至少覆盖 2 个真实相关功能文件，并逐项说明运行时职责和故障贡献
@@ -118,7 +118,7 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 - `numstat` 只能机械排除测试/文档/交付文件，不能识别注释、纯格式化、拆文件和无效逻辑；必须人工审阅 diff，确认变更确实服务于故障链。
 - **不要在跑完轨迹后的 `env/` 上量**——env 已被测试模型改回接近 gold，diff 会很小。
 
-**运行时机制、跨模块传播、真实复现或题面测试覆盖任一硬门禁不达标，都判埋错不合格。** 文件数、行数和逐文件回退属于辅助或增强证据。使用 `scripts/difficulty_review.py init/check` 维护记录根目录的私有 `difficulty_review.json`；该文件不得放进 `env/`。
+**运行时机制、跨模块传播、真实复现、题面测试覆盖或 bugfix 至少 5 行功能代码改动任一硬门禁不达标，都判埋错不合格。** 达到最低改动后，更高的文件数、行数和逐文件回退属于辅助或增强证据。使用 `scripts/difficulty_review.py init/check` 维护记录根目录的私有 `difficulty_review.json`；该文件不得放进 `env/`。
 
 ## 缺陷分类 bug_category
 
@@ -138,13 +138,13 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 
 ## 防泄漏清单
 
-- 目标红绿测试只存放在私有 `evaluator/`；正式轨迹前的 G1 不得包含任何测试文件、夹具目录或 test/spec 资产。
+- 目标红绿测试在正式轨迹完成前只存放在私有 `evaluator/`；模型可见快照不得包含任何测试文件、夹具目录或 test/spec 资产。最终 bugfix/diagnosis red 必须包含同一 evaluator 测试。
 - 正式修复轨迹必须在系统临时目录的无测试副本中运行：排除所有 `*_test.go`、`.git`、`evaluator`、`_gold` 和交付线索；成功后只回写非测试业务文件。
 - 不得用 system prompt、append system prompt 或拼接用户题面的方式注入额外轨迹约束文字；模型只收到 `prompt.txt` 原文，防泄漏依靠环境隔离和轨迹审计。
 - 测试模型 workspace 必须来自已发布 G1 的单分支快照，且不能有 `.git` 历史、remote、commit SHA、补丁文件、gold 修复说明。
 - 测试模型 workspace 和 prompt 里不能暴露本技能：不得出现 `SKILL.md`、`AGENTS.md`、`CLAUDE.md`、`.claude`、`BUG_REPRO.md`，也不得出现 `repo_url`、技能名等标记。`BUG_REPRO.md` 已全面禁用，任何位置发现都应删除或拒绝交付。
 - 远程不得存在 `main`、干净基座或 gold 分支。bugfix 的 green/red 用 `--orphan` 独立生根；diagnosis 只允许 orphan red；不同 bug 不得有共同祖先。
-- 跑轨迹前 bugfix green 只有 G1 单提交；收题后 green 为 G1→G2、red 为 R1。diagnosis 始终只有 red 单提交且不得创建 green。
+- 跑轨迹前 bugfix 远程 green 只有 G1 单提交；diagnosis 只在本地准备无测试 red 快照，远程 red 不得存在。收题后 bugfix green 为 G1→G2、red 为 R1；diagnosis 首次推送包含 evaluator 的 red 单提交且不得创建 green。
 - 绝不能把原始多分支 repo 交给模型；必须导出 G1 的模型可见快照，用 `g1_snapshot.json` 逐文件验证后再运行。
 - 轨迹质检发现模型 clone 上游 / WebFetch 上游源码按疑似作弊重跑。
 
@@ -205,15 +205,15 @@ git diff --no-index --numstat <project>/env _gold/<name>__<record> \
 ```text
 bugfix:    bug<record>_green  G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
            bug<record>_red    R1 orphan 单提交（G1 业务树+同一验收测试）
-diagnosis: bug<record>_red    orphan Bug 单提交 -> repo_url（不创建 green）
+diagnosis: bug<record>_red    轨迹后发布 orphan 单提交（Bug 业务树+同一验收测试） -> repo_url
 ```
 
-- 每个 repo 最多 30 条记录，每条 bugfix 一对 green/red orphan 分支；diagnosis 只有 red 单提交。
+- 每个 repo 最多 30 条记录，每条 bugfix 一对 green/red orphan 分支；diagnosis 只有包含 evaluator 测试的 red 单提交。
 - `repo_url`：bugfix 填 `bug<record>_green`；diagnosis 填 `bug<record>_red`。
 - green/red 交付分支必须包含根目录 Docker 交付文件，且不得包含 `BUG_REPRO.md`。
 - 每条记录必须有单行 `project_summary.txt`，包含 `Go`、明确项目类型和主要功能；发布后该句必须位于 `BENZHI_README.md` 第一行，`project_summary.txt` 本身不提交。
 - 交付不再打 zip、不再截图，只提交 GitHub `repo_url` 分支地址。
-- **`publish` 和 Docker 验证必须在跑轨迹前完成**；bugfix 轨迹前只允许 green G1，轨迹与私有绿灯通过后由 `finalize` 创建 G2/R1；diagnosis 在 publish 后始终只有 red 单提交。禁止把 gold 修复内容混入任何远程分支。
+- **`publish` 准备和 Docker 验证必须在跑轨迹前完成**；bugfix 轨迹前只允许远程 green G1，轨迹与私有绿灯通过后由 `finalize` 创建 G2/R1；diagnosis 的 publish 只准备本地无测试 red，正式轨迹通过后由 `finalize` 加入 evaluator 并首次推送最终 red。禁止把 gold 修复内容混入任何远程分支。
 - GitHub 仓库用 `github_project.py ensure` 自动创建 **public** repo（审核方需要能访问）；用 `publish` 推送 Bug 分支并输出 `repoUrl`。
 - GitHub 凭据/作者从 `~/.codex/pg-code/github-context.json` 读取，禁止输出 token。
 

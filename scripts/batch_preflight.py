@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_state import atomic_json, input_fingerprint, iter_projects, load_json, now, update_status  # noqa: E402
+from change_scope import MIN_FUNCTIONAL_CHANGED_LINES, meets_minimum_functional_change  # noqa: E402
 from contract_coverage import validate_manifest  # noqa: E402
 from difficulty_review import validate_review  # noqa: E402
 from trajectory_guard import copy_without_tests, inject_evaluator, private_test_issues  # noqa: E402
@@ -311,8 +312,11 @@ def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
         issues.append("task_type must be bugfix or diagnosis")
     if task_type == "bugfix":
         files, lines = _functional_diff(project / "env", gold)
-        if files < 1 or lines < 1:
-            issues.append("bugfix gold must contain a functional Go code change")
+        if not meets_minimum_functional_change(files, lines):
+            issues.append(
+                f"bugfix gold must change at least one functional Go file and "
+                f"{MIN_FUNCTIONAL_CHANGED_LINES} functional lines"
+            )
     if issues:
         payload = {"schema": 1, "gate_version": PREFLIGHT_GATE_VERSION,
                    "fingerprint": fingerprint, "result": "failed", "issues": issues,

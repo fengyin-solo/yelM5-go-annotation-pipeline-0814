@@ -7,7 +7,7 @@ GitHub 凭据/作者一律读取 pg-code 的 `~/.codex/pg-code/github-context.js
 分支模型（一个 repo 最多 30 条记录）：
     bugfix:    bug<record>_green  G1 bug 单提交 -> G2 模型修复+测试
                bug<record>_red    R1 bug 代码+同一测试（orphan 单提交）
-    diagnosis: bug<record>_red    bug 代码 orphan 单提交，不创建 green
+    diagnosis: bug<record>_red    轨迹后发布 bug 代码+测试（orphan 单提交），不创建 green
 
 本地 `_gold/` 只用于红绿校准、难度检查和回归验证，不创建远程分支。
 每个 bug 的 green/red 都独立生根，不得从 main 或其他 bug 分支派生。
@@ -38,8 +38,10 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trajectory_guard import (  # noqa: E402
     copy_evaluator_to_repo,
+    evaluator_files,
     is_test_artifact,
     private_test_issues,
+    source_manifest,
     write_source_manifest,
 )
 
@@ -232,6 +234,13 @@ def _tree_entries(repo: Path, revision: str, *, tests: bool) -> dict[str, str]:
         if is_test_artifact(path) == tests:
             result[path] = sha
     return result
+
+
+def _evaluator_entries(repo: Path, evaluator: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(evaluator)): run_git(repo, "hash-object", str(path)).stdout.strip()
+        for path in evaluator_files(evaluator)
+    }
 
 
 def _write_delivery_metadata(proj: Path, data: dict) -> None:
@@ -532,14 +541,21 @@ def _cmd_publish_unlocked(args):
     _assert_no_tests(repo, g1_sha)
     manifest_path = proj / "_delivery" / "g1_snapshot.json"
     write_source_manifest(repo, manifest_path, commit=g1_sha, branch=delivery_branch)
-    run_git(repo, "push", "-u", DEFAULT_REMOTE, delivery_branch, env=identity_env)
-    repo_url = f"{html}/tree/{delivery_branch}"
+    pending_repo_url = f"{html}/tree/{delivery_branch}"
+    if task_type == "diagnosis":
+        state = "g1_prepared"
+        repo_url = ""
+    else:
+        run_git(repo, "push", "-u", DEFAULT_REMOTE, delivery_branch, env=identity_env)
+        state = "g1_published"
+        repo_url = pending_repo_url
 
     _write_delivery_metadata(proj, {
         "schema": 1,
-        "state": "g1_published",
+        "state": state,
         "task_type": task_type,
         "repo_url": repo_url,
+        "pending_repo_url": pending_repo_url if task_type == "diagnosis" else "",
         "green_branch": green_branch if task_type == "bugfix" else "",
         "red_branch": red_branch,
         "g1_commit": g1_sha,
@@ -548,6 +564,7 @@ def _cmd_publish_unlocked(args):
     print(json.dumps({
         "ok": True,
         "repoUrl": repo_url,
+        "pendingRepoUrl": pending_repo_url if task_type == "diagnosis" else "",
         "deliveryBranch": delivery_branch,
         "greenBranch": green_branch if task_type == "bugfix" else "",
         "redBranch": red_branch,
@@ -560,6 +577,50 @@ def cmd_publish(args):
     root = Path(args.root).resolve()
     with repo_write_lock(root, args.repo_name):
         _cmd_publish_unlocked(args)
+
+
+def _assert_formal_acceptance(proj: Path, data: dict, task_type: str) -> str:
+    ev = proj / "_evidence"
+    guard_path = ev / "trajectory_guard.json"
+    acceptance_path = ev / "trajectory_acceptance.json"
+    missing = [path.name for path in (guard_path, acceptance_path) if not path.exists()]
+    if missing:
+        raise RuntimeError("正式轨迹验收未完成（缺少 _evidence/" + "、_evidence/".join(missing) + "）")
+
+    expected_sid = (data.get("session_id") or "").strip()
+    if not expected_sid:
+        raise RuntimeError("collection.json.session_id 为空，拒绝 finalize")
+    if not (proj / f"{expected_sid}.jsonl").is_file():
+        raise RuntimeError(f"缺少正式轨迹文件 {expected_sid}.jsonl，拒绝 finalize")
+
+    guard = json.loads(guard_path.read_text(encoding="utf-8"))
+    acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    guard_ok = guard.get("result") == "passed" and guard.get("classification", "clean") == "clean"
+    if guard.get("classification") == "suspect":
+        review_path = ev / "trajectory_review.json"
+        if review_path.exists():
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+            guard_ok = (
+                review.get("decision") == "approved"
+                and review.get("session_id") == guard.get("session_id")
+                and len((review.get("reason") or "").strip()) >= 20
+            )
+    if not guard_ok or guard.get("tests_visible") is not False:
+        raise RuntimeError("正式轨迹未获 clean 结论，或 suspect 未有效人工复核，拒绝 finalize")
+    if guard.get("session_id") != expected_sid:
+        raise RuntimeError("正式轨迹守卫 session_id 与 collection.json 不一致")
+
+    checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), dict) else {}
+    required = {"trajectory_analysis", "regression", "task_semantics"}
+    required.add("private_verify" if task_type == "bugfix" else "diagnosis_root_cause")
+    if (
+        acceptance.get("result") != "passed"
+        or acceptance.get("session_id") != expected_sid
+        or not required.issubset(checks)
+        or any(checks[name].get("passed") is not True for name in required)
+    ):
+        raise RuntimeError("自动轨迹验收未通过、session 不一致，或缺少 task_type 对应验收证据，拒绝 finalize")
+    return expected_sid
 
 
 def _cmd_finalize_unlocked(args):
@@ -584,12 +645,104 @@ def _cmd_finalize_unlocked(args):
         task_type = (data.get("task_type") or "").strip().lower()
     if not bug_id:
         raise RuntimeError("--bug-id 缺失，且 collection.json 中没有 bug_id")
-    if task_type == "diagnosis":
-        raise RuntimeError("diagnosis 题只交付 orphan red 单提交，不执行 finalize")
+    if task_type not in {"bugfix", "diagnosis"}:
+        raise RuntimeError("collection.json.task_type 必须是 bugfix 或 diagnosis")
     evaluator = proj / "evaluator"
     private_issues = private_test_issues(env_dir, evaluator, data.get("verify_cmds") or "")
     if private_issues:
         raise RuntimeError("私有测试门禁失败：" + "；".join(private_issues))
+
+    if task_type == "diagnosis":
+        expected_sid = _assert_formal_acceptance(proj, data, task_type)
+        repo = central_repo_dir(root, repo_name)
+        if not (repo / ".git").exists():
+            raise RuntimeError(f"central repo not found: {repo}（请先运行 github_project.py ensure/publish）")
+
+        ctx = load_context()
+        github = ctx["github"]
+        author = ctx["gitAuthor"]
+        remote_url = run_git(repo, "remote", "get-url", DEFAULT_REMOTE).stdout.strip()
+        html = remote_url[:-4] if remote_url.endswith(".git") else remote_url
+        auth_env = git_auth_env(remote_url, github["username"], github["token"])
+        identity_env = git_identity_env(auth_env, author["name"], author["email"])
+
+        record = proj_name.rsplit("__", 1)[-1] if "__" in proj_name else "001"
+        green_branch, red_branch = delivery_branches(record)
+        if _branch_exists(repo, green_branch):
+            raise RuntimeError(f"diagnosis 不应存在 green 分支 {green_branch}")
+        if run_git(repo, "rev-parse", "--verify", red_branch, check=False).returncode != 0:
+            raise RuntimeError(f"本地预备分支 {red_branch} 不存在（请先运行 github_project.py publish）")
+        remote_red = run_git(
+            repo, "ls-remote", "--exit-code", "--heads", DEFAULT_REMOTE, red_branch, check=False
+        )
+        remote_red_sha = remote_red.stdout.split()[0] if remote_red.returncode == 0 and remote_red.stdout.strip() else ""
+
+        run_git(repo, "checkout", red_branch)
+        if run_git(repo, "rev-list", "--count", red_branch).stdout.strip() != "1":
+            raise RuntimeError("diagnosis 预备 red 必须为 orphan 单提交")
+        current_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        manifest_path = proj / "_delivery" / "g1_snapshot.json"
+        meta_path = proj / "_evidence" / "repository_delivery.json"
+        if not manifest_path.is_file() or not meta_path.is_file():
+            raise RuntimeError("缺少 diagnosis 预备快照或交付元数据")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        if metadata.get("state") != "g1_prepared":
+            raise RuntimeError("diagnosis 预备 red 状态与 repository_delivery.json 不一致")
+        if manifest.get("files") != source_manifest(repo):
+            raise RuntimeError("diagnosis 预备 red 与 g1_snapshot.json 不一致")
+
+        actual_tests = _tree_entries(repo, current_sha, tests=True)
+        expected_tests = _evaluator_entries(repo, evaluator)
+        if actual_tests:
+            if actual_tests != expected_tests:
+                raise RuntimeError("diagnosis 本地 red 已有测试，但与 evaluator 路径或内容不一致")
+            copied_tests = sorted(expected_tests)
+            red_sha = current_sha
+            prepared_sha = metadata.get("g1_commit") or ""
+        else:
+            if metadata.get("g1_commit") != current_sha or manifest.get("commit") != current_sha:
+                raise RuntimeError("diagnosis 预备 red commit 与快照元数据不一致")
+            prepared_sha = current_sha
+            _assert_no_tests(repo, prepared_sha)
+            copied_tests = copy_evaluator_to_repo(evaluator, repo)
+            run_git(repo, "add", "-A", "--", ".")
+            run_git(repo, "commit", "--amend", "-m", f"red-test: {bug_id}", env=identity_env)
+            red_sha = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        if run_git(repo, "rev-list", "--count", red_branch).stdout.strip() != "1":
+            raise RuntimeError("diagnosis 最终 red 必须为 orphan 单提交")
+        if not _tree_entries(repo, red_sha, tests=True):
+            raise RuntimeError("diagnosis 最终 red 缺少验收测试")
+        if remote_red_sha and remote_red_sha != red_sha:
+            raise RuntimeError(f"远程 diagnosis red {red_branch} 与本地最终提交不一致，拒绝 force-push")
+
+        write_source_manifest(repo, manifest_path, commit=red_sha, branch=red_branch)
+        run_git(repo, "push", "-u", DEFAULT_REMOTE, red_branch, env=identity_env)
+        repo_url = f"{html}/tree/{red_branch}"
+        _write_delivery_metadata(proj, {
+            "schema": 2,
+            "state": "finalized",
+            "task_type": "diagnosis",
+            "repo_url": repo_url,
+            "green_branch": "",
+            "red_branch": red_branch,
+            "prepared_commit": prepared_sha,
+            "g1_commit": red_sha,
+            "r1_commit": red_sha,
+            "g1_manifest": str(manifest_path.relative_to(proj)),
+            "session_id": expected_sid,
+            "test_files": copied_tests,
+            "finalized_at": datetime.now(timezone.utc).isoformat(),
+        })
+        print(json.dumps({
+            "ok": True,
+            "repoUrl": repo_url,
+            "r1Commit": f"{html}/commit/{red_sha}",
+            "testFiles": copied_tests,
+            "greenBranch": "",
+            "redBranch": red_branch,
+        }, ensure_ascii=False))
+        return
 
     # 绿灯门禁：只有绿灯确认过的修复才推上 GitHub，避免无效修复 commit 进交付分支。
     ev = proj / "_evidence"
@@ -606,35 +759,8 @@ def _cmd_finalize_unlocked(args):
             "绿灯验收未完成（缺少 _evidence/" + "、_evidence/".join(missing) + "）。"
             "请先运行 run_evidence_trajectories.py generate --phase green 通过绿灯和全量回归再推送。"
         )
-    guard = json.loads((ev / "trajectory_guard.json").read_text(encoding="utf-8"))
-    acceptance = json.loads((ev / "trajectory_acceptance.json").read_text(encoding="utf-8"))
     regression = json.loads((ev / "green_regression.json").read_text(encoding="utf-8"))
-    expected_sid = (data.get("session_id") or "").strip()
-    if not expected_sid:
-        raise RuntimeError("collection.json.session_id 为空，拒绝 finalize")
-    guard_ok = guard.get("result") == "passed" and guard.get("classification", "clean") == "clean"
-    if guard.get("classification") == "suspect":
-        review_path = ev / "trajectory_review.json"
-        if review_path.exists():
-            review = json.loads(review_path.read_text(encoding="utf-8"))
-            guard_ok = (
-                review.get("decision") == "approved"
-                and review.get("session_id") == guard.get("session_id")
-                and len((review.get("reason") or "").strip()) >= 20
-            )
-    if not guard_ok or guard.get("tests_visible") is not False:
-        raise RuntimeError("正式轨迹未获 clean 结论，或 suspect 未有效人工复核，拒绝 finalize")
-    if guard.get("session_id") != expected_sid:
-        raise RuntimeError("正式轨迹守卫 session_id 与 collection.json 不一致")
-    acceptance_checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), dict) else {}
-    required_acceptance = {"trajectory_analysis", "regression", "task_semantics", "private_verify"}
-    if (
-        acceptance.get("result") != "passed"
-        or acceptance.get("session_id") != expected_sid
-        or not required_acceptance.issubset(acceptance_checks)
-        or any(acceptance_checks[name].get("passed") is not True for name in required_acceptance)
-    ):
-        raise RuntimeError("自动轨迹验收未通过、session 不一致，或缺私测/回归证据，拒绝 finalize")
+    expected_sid = _assert_formal_acceptance(proj, data, task_type)
     if regression.get("result") != "passed":
         raise RuntimeError("绿灯后全量回归未通过，拒绝推送")
 

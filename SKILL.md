@@ -59,7 +59,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 
 1. **选题全部用自己的 0-1 生成项目**，不再去 GitHub 找题。
 2. **同一个 repo 最多 30 条数据**，每条一个不同 bug；同一个 bug 只能出 bugfix / diagnosis **二选一**。用户要求超过 30 条时，必须按每仓最多 30 条拆成多个不同的 0-1 项目和 GitHub 仓库，仓库数为 `ceil(总条数 / 30)`。
-3. **repo_url 按 task_type 取分支**：bugfix 填 `bug<record>_green`，其 green 从 G1 追加 G2，并配套 orphan red R1；diagnosis 只创建 orphan `bug<record>_red` 单提交，`repo_url` 直接填该 red 地址，禁止创建 green。
+3. **repo_url 按 task_type 取分支**：bugfix 填 `bug<record>_green`，其 green 从 G1 追加 G2，并配套 orphan red R1；diagnosis 在正式轨迹通过后创建唯一的 orphan `bug<record>_red` 单提交，其中包含 Bug 业务树和同一 `evaluator/` 验收测试，`repo_url` 填该 red 地址，禁止创建 green。
 4. GitHub 去重身份**优先用 GitHub 地址，其次用本地路径**。
 5. 交付只提交 GitHub `repo_url` 分支地址；不再提交修复 commit 字段，不打 zip、不截图。
 6. Dockerfile 要支持 arm64/amd64，但本流程**实际只验证当前机器平台**。
@@ -67,8 +67,8 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 8. **Docker 验证和 G1 发布必须在跑轨迹前完成；G2/R1 只能在轨迹、私有绿灯和全量回归通过后创建**。不得远程发布 `main`、干净基座、gold 或其他可用于反推答案的分支。
 9. **GitHub 仓库名用真实项目名，长度 3-5 个英文单词**：用「领域 + 用途 + 类型」拼成描述性名字（如 `sensor-telemetry-ingestion-service`），既具体又不至于重名；不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 等字样；本地项目名用领域命名，别用 `forex` 这类泛化名。
 10. **`verify_cmds` 对 bugfix / diagnosis 都必填，且只能是目标 Bug 的定向复现命令**：明确写出唯一目标包、精确测试名和 `-count=1`（并发类加 `-race`），禁止 `go test ./...`、通配包、当前目录、多包或拼接全量回归；命令对应的测试必须完整覆盖 `user_query` 描述的全部现象与触发条件。红、绿证据轨迹都必须**只实际执行一次**这条命令，实际 Bash 调用、最终回复【命令】和正式填表的 `verify_cmds` 必须逐字符完全相同，空格、路径写法、引号、参数顺序均不得变化；bugfix 校验红+绿，diagnosis 校验红。
-11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。文件数和增删行数只记录为辅助信息，不作为通用硬门禁。
-12. **禁止用规模冒充难度**：纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误通常不合格；但是否合格以真实定位难度、故障传播和测试证据判断，不要求人为扩写到固定文件数或行数。
+11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。bugfix 的 gold 必须改动至少 1 个功能 Go 文件，功能代码增删总行数至少 5 行；达到最低规模后，文件数和行数只作辅助信息，不作为更高的通用难度门禁。
+12. **禁止用规模冒充难度**：纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误通常不合格；但是否合格以真实定位难度、故障传播和测试证据判断，不要求人为扩写到超过 5 行的固定规模或固定文件数。
 13. **禁止项目/功能点门禁优先于埋错和难度设计**：查账账务与订单类为最高优先级禁区，完整清单见 [references/forbidden-domains.md](references/forbidden-domains.md)。项目总体允许不代表每个功能点都允许；任一单条功能点命中禁区就立即换题，不得先埋错再靠改写 `user_query` 规避。
 14. **`bug_id` 固定为批次根目录名 + `-` + 三位 record**：record 仅从记录目录末尾 `__NNN` 取值，前缀必须取 `--root` 指向目录的 basename，不得从 repo 名、GitHub 仓库名或记录目录主体派生。例如批次根目录为 `55-connection-pool【10】`、记录目录为 `connection-pool-observability-service__001` 时，`bug_id` 必须为 `55-connection-pool【10】-001`，保留批次根目录名的原始字符。
 
@@ -249,7 +249,7 @@ GitHub 分支模型：
 ```text
 bugfix:    bug<record>_green  G1 orphan Bug 单提交 -> 收题后 G2（模型修复+验收测试） -> repo_url
            bug<record>_red    R1 orphan 单提交（G1 业务树+与 G2 完全相同的验收测试）
-diagnosis: bug<record>_red    orphan Bug 单提交 -> repo_url（不创建 green）
+diagnosis: bug<record>_red    轨迹后发布 orphan 单提交（Bug 业务树+验收测试） -> repo_url（不创建 green）
 ```
 
 bugfix 的每对 green/red 无共同祖先；不同 bug 之间也无共同祖先。当前 Codex 的正确修复只保存在本地 `_gold/<project>/`，不创建或推送远程 gold 分支。
@@ -292,7 +292,7 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
    - **先审功能点再设计机制**：用 `domain_guard.py --text '<业务功能点 + 触发流程 + 用户可见结果>'` 检查，并按 forbidden-domains.md 人工复核。命中禁区时更换功能点；不得在禁用功能上继续选择 P1-P12、写测试或埋错。
    - 按 bug_category 选型。bug_category 只允许以下取值：`concurrency并发问题` / `slice相关问题` / `error异常错误` / `nil相关问题` / `context相关问题` / `defer相关问题` / `其他问题`；优先 concurrency / nil / slice / error / context / defer 里多步定位、强模型也会栽的缺陷。
    - **埋法从深度模式库随机抽取**：`python3 <skill>/scripts/pick_bug_pattern.py`（P1–P12，详细埋法见 [references/bug-patterns.md](references/bug-patterns.md)）；单仓达到 13–30 条时允许轮换复用模式骨架，但同一模式必须换业务层次、埋点组合、触发条件和用户可见症状，不能复刻同一个 bug。优先轮完 P1–P12 后再复用，`--exclude` 只排除近期已用模式。
-   - **硬性红线（真实故障链）**：核心缺陷必须涉及运行时机制，跨至少 2 个相关模块/包，并依赖时序、生命周期或状态转换触发。文件数和增删行数只用于辅助审查；不得拆文件或堆无效代码制造表面规模。详细标准见 [references/rules.md](references/rules.md) 的「埋错复杂度红线」。
+   - **硬性红线（真实故障链）**：核心缺陷必须涉及运行时机制，跨至少 2 个相关模块/包，并依赖时序、生命周期或状态转换触发。bugfix 的 gold 必须包含至少 1 个功能 Go 文件、至少 5 行功能代码增删；达到该最低值后，文件数和行数只用于辅助审查。不得拆文件或堆无效代码制造表面规模。详细标准见 [references/rules.md](references/rules.md) 的「埋错复杂度红线」。
    - 埋完不得留任何「这里故意埋错」的注释或说明。
    - **埋错自检（本地、发布前）**：直接对比 `env/` 与 `_gold/` 统计功能代码改动规模，不需要等 GitHub 分支：
 
@@ -302,7 +302,7 @@ python3 <skill>/scripts/workspace.py new-project --root . --source local \
        | awk '{add+=$1; del+=$2; n++} END {print n" functional files, "add+del" changed lines (+"add"/-"del")"}'
      ```
 
-     该命令只用于观察改动规模，不再以固定文件数或行数决定通过。人工查看 diff，排除注释、格式化、拆文件和无效代码，并确认修复确实对应故障链。最终复核仍对比本地埋错基线与 `_gold/`；**不要在跑完轨迹后的 env 上量**。
+     该命令用于确认 bugfix 的 gold 至少改动 1 个功能 Go 文件、功能代码增删总行数至少 5 行；达到最低值后不再以更高的固定文件数或行数决定通过。人工查看 diff，排除注释、格式化、拆文件和无效代码，并确认修复确实对应故障链。最终复核仍对比本地埋错基线与 `_gold/`；**不要在跑完轨迹后的 env 上量**。
    - **难度审查必须在题面完成后、红绿校准前通过**：先运行 `difficulty_review.py init` 创建私有审查单，填写机制、触发顺序、跨层范围、题面症状与测试断言映射。对确实分布在多个文件的修复，可填写 `repair_ablation_checks` 并逐文件回退留证，但不作为所有 bugfix 的统一要求。
    - **目标测试只能写入 `<project>/evaluator/`**，并按它最终进入 Repo 的相对路径存放。G1 和正式轨迹快照中不得有任何测试文件、`test/tests/testdata/evaluator` 夹具目录或常见 test/spec 文件；验收测试只在收题后的 G2/R1 出现。
 2. **在 `_gold/<name>__<record>/` 里写 gold 修复**：
@@ -426,9 +426,9 @@ python3 <skill>/scripts/check_prompt_duplicates.py --root .
 - `success_criteria` 只写业务触发、故障表现、修复后的公开行为、回退复现与回归结果；不得出现 `env`、`_gold`、出题人或测试模型等内部角色和目录。
 `collection_table.py write` 和 `post_qc.py` 会对上述交付字段执行同一套禁词校验；命中即拒绝写入或判后置质检失败。
 
-## 第 6 步：Docker 验证 + 项目简介 + 发布 GitHub（跑轨迹前）
+## 第 6 步：Docker 验证 + 项目简介 + 准备交付快照（跑轨迹前）
 
-> 必须在跑轨迹前发布无测试资产的 orphan Bug 单提交：bugfix 发布到 `bug<record>_green`，diagnosis 发布到且只发布到 `bug<record>_red`。bugfix 此时 G2 和 R1 绝对不得存在。
+> 跑轨迹前必须准备无测试资产的模型快照：bugfix 将 orphan G1 推送到 `bug<record>_green`；diagnosis 只在本地 staging repo 准备 orphan red，远程 red 此时不得存在。diagnosis 正式轨迹通过后才加入 evaluator 并首次推送最终 red。
 
 ### 6.1 Docker 本机验证
 
@@ -449,7 +449,7 @@ python3 <skill>/scripts/build_docker.py verify --root . --project <name>__<recor
 
 发布脚本会把该句逐字写到仓库根目录 `BENZHI_README.md` 的第一行。`project_summary.txt` 是记录元数据，不进入 GitHub 分支。项目目录、`env/` 和交付分支均不得包含 `BUG_REPRO.md`。
 
-### 6.3 发布 Bug 分支，产出 repo_url
+### 6.3 准备/发布 Bug 快照
 
 ```bash
 python3 <skill>/scripts/github_project.py publish \
@@ -460,11 +460,13 @@ python3 <skill>/scripts/github_project.py publish \
 脚本会：
 
 - 先硬性检查 `evaluator/` 中的目标测试不存在于 `env/`；
-- 用 `git checkout --orphan` 创建交付分支，把排除所有 `*_test.go` 的 `env/` 与交付文件写成单提交；bugfix 使用 `bug<record>_green`，diagnosis 只使用 `bug<record>_red`；
+- 用 `git checkout --orphan` 创建无测试的模型快照；bugfix 使用 `bug<record>_green` 并立即推送，diagnosis 使用本地 `bug<record>_red` 预备分支但不推送；
 - **强制校验** `benzhi.Dockerfile`、`build_benzhi_docker.sh`、`BENZHI_README.md` 均在仓库根目录；若旧版在模块子目录留下同名副本，脚本会清理后再发布；
 - **强制校验** `BENZHI_README.md` 第一行与 `project_summary.txt` 一致，且所有交付分支都不含 `BUG_REPRO.md`；
 - 写入 `<project>/_delivery/g1_snapshot.json`，记录模型可见文件的 SHA-256；`run_trajectory.py` 必须逐文件匹配该清单才能开跑；
-- 输出对应交付分支的 `repoUrl`（填 `repo_url`）；本地 `_gold/` 不提交到 GitHub。
+- bugfix 输出可立即回填的 green `repoUrl`；diagnosis 只记录待发布 red 地址，正式 `repo_url` 在轨迹通过并 finalize 后回填；本地 `_gold/` 不提交到 GitHub。
+
+> 为兼容既有 batch 状态序列，diagnosis 本地快照准备完成后仍使用内部阶段标记 `g1_published`，但 `_evidence/repository_delivery.json.state` 必须是 `g1_prepared`，且远程 red 必须不存在；只有 finalize 后才是 `finalized` 和真实发布。
 
 ## 第 7 步：跑轨迹
 
@@ -550,7 +552,7 @@ python3 <skill>/scripts/analyze_trajectory.py <project>/trajectory.jsonl
 
 文件路径为 `<project>/_evidence/trajectory_review.json`。`reason` 至少 20 字，不得只写“已确认”。
 
-### 8.1 finalize G2/R1（bugfix 题）
+### 8.1 finalize 最终交付分支
 
 bugfix 题在轨迹审计、自动轨迹验收、私有绿灯和全量回归通过后执行。`finalize` 强制检查 collection / guard / acceptance 三方 session_id 非空且一致，并检查自动验收内的私测、回归、语义与轨迹分析都通过。`clean` 自动放行；`suspect` 必须有绑定 session_id、填写理由的 `_evidence/trajectory_review.json`；`cheat` 不得 finalize。
 
@@ -567,7 +569,7 @@ python3 <skill>/scripts/github_project.py finalize \
 - 硬校验 green 恰好两个提交、red 恰好一个提交、两分支无共同祖先、G1/R1 非测试文件逐 blob 一致、G2/R1 验收文件逐 blob 一致；
 - 写入 `_evidence/repository_delivery.json`，绑定 G1/G2/R1 SHA 与本条轨迹 session_id。
 
-diagnosis 题不执行 finalize，只保留 publish 创建的 orphan red 单提交，且不得出现 green。`push-fix` 仅作旧命令兼容入口，新流程统一使用 `finalize`。
+diagnosis 也必须执行 finalize，但不跑绿灯、不创建 green。脚本先校验正式 diagnosis 轨迹的 guard、session_id、零改动语义和 `diagnosis_root_cause` 均通过，再把同一记录的 `evaluator/` 测试加入本地预备 red，通过 `commit --amend` 保持 orphan 单提交，最后首次推送 red 并回填 `repo_url`。最终 diagnosis red 与 bugfix red 一样包含 Bug 业务树、`*_test.go` 和 testdata，且测试路径与内容必须和 evaluator 完全一致。`push-fix` 仅作旧命令兼容入口。
 
 ## 第 9 步：填收集表 + 上传轨迹 + 质检 + 平台提交 + 收尾登记
 
@@ -630,7 +632,7 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 只读、不改产物。逐条输出 ✅/❌，最终汇总；有任何一条不合格就退出码非 0。校验项：
 
 1. **runtime**：核对 preflight 与 Docker 留存的 build、回归和 20/20 红绿证据及输入指纹，默认不重复执行；排障时加 `--recheck-runtime` 显式复跑；
-2. **scope**：报告功能代码改动文件数和行数，确认存在真实修复，不用固定规模代替难度判断；
+2. **scope**：bugfix 的 gold 至少改动 1 个功能 Go 文件、功能代码增删总行数至少 5 行；达到最低值后仍由故障链证据判断难度；
 5. **privacy**：目标测试只存在 `evaluator/`，`env/` 和初始 Bug 基线中不存在；
 6. **files**：`<session_id>.jsonl` / `project_summary.txt` / `collection.json` 齐全，记录目录不含 `BUG_REPRO.md`；
 7. **fields**：`collection.json` 必填字段齐全；
@@ -640,7 +642,7 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 11. **coverage**：`verify_cmds` 形态合法，且 `contract_coverage.json` 将 evaluator 每条断言映射到题面、`success_criteria` 和难度证据；
 12. **difficulty**：运行时机制、跨层触发和题面覆盖证据齐全；已填写的可选回退证据必须有效；
 13. **domain**：项目与功能点未命中禁止类型。
-14. **repository**：远程无 `main`/干净基座；bugfix 校验 green/red orphan 拓扑及 G1/G2/R1，diagnosis 校验 red-only orphan 单提交且不存在 green；G1 快照、简介和 `BUG_REPRO.md` 禁令均一致。
+14. **repository**：远程无 `main`/干净基座；bugfix 校验 green/red orphan 拓扑及 G1/G2/R1；diagnosis 校验 red-only orphan 单提交、不存在 green，并强制 red 测试与 evaluator 路径和内容完全一致；模型快照、简介和 `BUG_REPRO.md` 禁令均一致。
 
 > 交付前各项必须全绿；其中 repository 是防止模型通过 Git 历史或其他 bug 分支抄到答案的最后硬门禁。
 
@@ -716,7 +718,7 @@ python3 <skill>/scripts/repo_registry.py sync --root .
 
 red / green / 修复轨迹共用跨进程模型槽位，默认全局最多同时运行 8 路。`batch_pipeline.py` 默认传 `--model-workers 8`；`run_evidence_trajectories.py generate` 与 `run_trajectory.py run` 默认使用 `--model-slots 8`，槽位文件位于 `~/.codex/go-annotation-pipeline/model-slots/`，等待超时仍由 `--lock-timeout` 控制。参数可设为 1-8；不同调用方并行运行时必须使用相同槽位数，设为 1 时恢复全局串行。
 
-同一记录内部必须保持顺序：bugfix 为 G1 green 发布→红灯→正式轨迹→绿灯→G2/R1 finalize；diagnosis 为 red-only 发布→红灯→正式轨迹。不同记录独立推进并使用各自隔离工作区；同仓库的 Git 写临界区通过仓库锁串行，不同仓库的 Git 写可并行。并发不得删除、抽样或降级任何门禁。
+同一记录内部必须保持顺序：bugfix 为 G1 green 发布→红灯→正式轨迹→绿灯→G2/R1 finalize；diagnosis 为本地无测试 red 快照→红灯→正式轨迹→加入 evaluator→red-only finalize/首次推送。不同记录独立推进并使用各自隔离工作区；同仓库的 Git 写临界区通过仓库锁串行，不同仓库的 Git 写可并行。并发不得删除、抽样或降级任何门禁。
 
 ### 生成并回填 verify_result
 

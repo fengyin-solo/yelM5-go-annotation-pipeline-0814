@@ -8,7 +8,7 @@
   0. preflight   新批次必须有 20/20 红绿和目标断言证据；回退证据按题目需要选用
   1. privacy     目标测试只存在私有 evaluator，env 和初始 Bug 基线不得包含
   2. runtime     核对 preflight/Docker 留存的 build、红绿校准证据；仅显式要求时复跑
-  3. scope       记录功能代码改动规模，不再用固定文件数/行数代替难度判断
+  3. scope       功能代码至少改动 1 个文件、5 行；更高规模不作为难度门禁
   6. files       轨迹、project_summary.txt、collection.json 齐全，且无 BUG_REPRO.md
   7. fields      collection.json 必填字段齐全（bugfix: verify_cmds/verify_result；
                  diagnosis: verify_cmds/gold_root_cause/verify_result）
@@ -46,9 +46,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trajectory_guard import inject_evaluator, is_test_artifact, private_test_issues, source_manifest  # noqa: E402
+from trajectory_guard import evaluator_files, inject_evaluator, is_test_artifact, private_test_issues, source_manifest  # noqa: E402
 from batch_state import input_fingerprint  # noqa: E402
 from bug_identity import bug_id_for_project  # noqa: E402
+from change_scope import MIN_FUNCTIONAL_CHANGED_LINES, meets_minimum_functional_change  # noqa: E402
 from project_summary import read_project_summary  # noqa: E402
 
 
@@ -238,13 +239,7 @@ def functional_diff_scope(buggy: Path, gold: Path) -> tuple[int, int]:
         added, deleted, path = parts
         normalized = path.lower().replace("\\", "/")
         name = normalized.rsplit("/", 1)[-1]
-        if (
-            name.endswith("_test.go")
-            or name.startswith("readme")
-            or name.endswith((".md", ".rst", ".txt"))
-            or "benzhi" in name
-            or name == "build_benzhi_docker.sh"
-        ):
+        if not name.endswith(".go") or name.endswith("_test.go"):
             continue
         if not added.isdigit() or not deleted.isdigit():
             continue
@@ -353,6 +348,19 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
             issues.append("repo_url 指向的远程 red 未同步到本地提交")
         if _git(repo, "rev-list", "--count", red).stdout.strip() != "1":
             issues.append("diagnosis red 必须为 orphan 单提交")
+        actual_tests = _git_tree(repo, g1, True)
+        expected_tests = {
+            str(path.relative_to(proj / "evaluator")): _git(repo, "hash-object", str(path)).stdout.strip()
+            for path in evaluator_files(proj / "evaluator")
+        }
+        if not actual_tests:
+            issues.append("diagnosis red 没有验收测试")
+        if actual_tests != expected_tests:
+            issues.append("diagnosis red 的验收测试与 evaluator 路径或内容不一致")
+        if sorted(meta.get("test_files") or []) != sorted(expected_tests):
+            issues.append("diagnosis red 测试文件与交付元数据不一致")
+        if meta.get("r1_commit") != g1:
+            issues.append("diagnosis red commit 与交付元数据不一致")
     else:
         if _git(repo, "rev-parse", "--verify", green, check=False).returncode != 0:
             return False, f"缺少 green 分支 {green}"
@@ -401,7 +409,7 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
             issues.append(f"{branch} 不得包含 BUG_REPRO.md")
 
     if g1:
-        if _git_tree(repo, g1, True):
+        if task_type == "bugfix" and _git_tree(repo, g1, True):
             issues.append("G1 包含测试文件或测试夹具")
         if meta.get("g1_commit") != g1 or manifest.get("commit") != g1:
             issues.append("G1 commit 与交付元数据不一致")
@@ -425,19 +433,19 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
 
     if meta.get("repo_url") != repo_url:
         issues.append("collection.repo_url 与交付元数据不一致")
-    if task_type == "bugfix":
-        if meta.get("state") != "finalized" or meta.get("session_id") != (coll.get("session_id") or ""):
-            issues.append("G2/R1 交付状态未绑定本条正式轨迹 session")
+    if meta.get("state") != "finalized" or meta.get("session_id") != (coll.get("session_id") or ""):
+        issues.append("最终交付状态未绑定本条正式轨迹 session")
+    if task_type in {"bugfix", "diagnosis"}:
         guard_path = proj / "_evidence" / "trajectory_guard.json"
         if guard_path.exists() and meta.get("finalized_at"):
             try:
                 completed = datetime.fromisoformat(json.loads(guard_path.read_text(encoding="utf-8"))["completed_at"])
                 finalized = datetime.fromisoformat(meta["finalized_at"])
                 if finalized < completed:
-                    issues.append("G2/R1 在正式轨迹完成前已创建")
+                    issues.append("最终交付分支在正式轨迹完成前已创建")
             except Exception as exc:
                 issues.append(f"无法核对轨迹/finalize 时序: {exc}")
-    topology = "diagnosis red-only orphan 拓扑与 G1 快照均通过" if task_type == "diagnosis" else "orphan 拓扑、G1/G2/R1 文件树与快照均通过"
+    topology = "diagnosis red-only orphan 单提交、验收测试与模型快照均通过" if task_type == "diagnosis" else "orphan 拓扑、G1/G2/R1 文件树与快照均通过"
     return not issues, "；".join(issues) or topology
 
 
@@ -525,8 +533,13 @@ def check_record(proj: Path, go_ver: str, args) -> list[tuple[str, bool, str]]:
             results.append(("scope", False, "缺 .base_snapshot，无法核对 gold 修复规模"))
         else:
             changed_files, changed_lines = functional_diff_scope(base, gold_dir)
-            scope_ok = changed_files >= 1 and changed_lines >= 1
-            results.append(("scope", scope_ok, f"功能代码 {changed_files} 个文件，增删 {changed_lines} 行；难度由故障链证据判断"))
+            scope_ok = meets_minimum_functional_change(changed_files, changed_lines)
+            results.append((
+                "scope",
+                scope_ok,
+                f"功能代码 {changed_files} 个文件，增删 {changed_lines} 行（最低 "
+                f"{MIN_FUNCTIONAL_CHANGED_LINES} 行）；难度仍由故障链证据判断",
+            ))
 
     # 3/4. red / green
     buggy = base if base.exists() else env_dir

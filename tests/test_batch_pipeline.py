@@ -74,6 +74,23 @@ class BatchPipelineTest(unittest.TestCase):
             self.assertEqual(1, len(pipeline["attempt_history"]))
             self.assertEqual("passed", pipeline["stages"]["preflight_passed"]["result"])
 
+    def test_reconcile_restores_final_repo_url_after_interrupted_finalize(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(Path(tmp))
+            (project / "_delivery").mkdir()
+            (project / "_delivery" / "g1_snapshot.json").write_text("{}\n", encoding="utf-8")
+            evidence = project / "_evidence"
+            evidence.mkdir()
+            repo_url = "https://github.com/example/demo/tree/bug001_red"
+            (evidence / "repository_delivery.json").write_text(json.dumps({
+                "state": "finalized", "repo_url": repo_url,
+            }), encoding="utf-8")
+
+            batch_pipeline.reconcile(project)
+
+            self.assertEqual(repo_url, load_json(project / "collection.json")["repo_url"])
+            self.assertEqual("passed", load_json(project / "status.json")["pipeline"]["stages"]["finalized"]["result"])
+
     def test_resume_rejects_changed_preflight_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

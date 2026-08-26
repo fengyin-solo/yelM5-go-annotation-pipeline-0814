@@ -17,7 +17,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 | bug_id | 固定为批次根目录名 + `-` + 记录目录末尾的三位 record；如根目录 `55-connection-pool【10】` 下的 `connection-pool-observability-service__001` 对应 `55-connection-pool【10】-001`，不得从 repo/仓库名派生 |
 | task_type | `bugfix` / `diagnosis`；同一个 bug 只能二选一，不得同时出两条 |
 | bug_category | 只允许以下取值（原样填写）：`concurrency并发问题` / `slice相关问题` / `error异常错误` / `nil相关问题` / `context相关问题` / `defer相关问题` / `其他问题`；优先前六类，确属其他才用 `其他问题` |
-| repo_url | bugfix 填 `bug<record>_green` 地址（最终 G1→G2，并配套 orphan red R1）；diagnosis 填唯一的 `bug<record>_red` 地址，且不得创建 green |
+| repo_url | bugfix 填 `bug<record>_green` 地址（最终 G1→G2，并配套包含 evaluator 的 orphan red R1）；diagnosis 在正式轨迹通过后填唯一的 `bug<record>_red` 地址，该 red 为包含同一 evaluator 测试的 orphan 单提交，且不得创建 green |
 | go_version | 三段式，ASCII 分号 `;` 分隔：基础镜像 tag + go.mod 指令 + GOTOOLCHAIN |
 | repro_determinism | 只填 `deterministic` / `flaky`；flaky 不做 bugfix |
 | user_query | 纯文本、简短口语化、高中生语言的**纯提示词**：现象 + 人味化废话 + 环境交代 + 任务指令；环境正常写“当前项目就可以了”，**禁止写 Go 版本号或 Go 工具链版本**；**不写任何验收/复现/运行命令、不贴命令代码块**（`verify_cmds` 独立维护）；确需展示症状代码时最小复现 ≤3 行；bugfix 明确写“帮我修好”，diagnosis 明确写“先别改代码”；不出现根因/原因，不用“不是...而是...”等 AI 词 |
@@ -41,7 +41,7 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 - **交付字段统一采用真实故障叙事**：`bug_id`、`user_query`、`gold_root_cause`、`success_criteria` 只描述程序原本存在的问题及其验证结果，不得出现“埋错 / 埋 bug / 人工注入 / 故障注入 / 出题环境 / `_gold` / gold 修复”等内部流程措辞。红灯阶段写“问题存在时 / 修复前 / 当前代码中”，不得写“埋错态 / 埋错环境”。
 - **禁止业务类型不能晚修**：上述描述字段任一命中 [forbidden-domains.md](forbidden-domains.md)，必须废弃当前功能点并重新选题；禁止只删除关键词或改写业务实体后继续填表。
 
-- `repo_url`：bugfix 填 `bug<record>_green`，审核方按同 record 的 `_red` 查看 R1；diagnosis 直接填唯一的 `bug<record>_red`。仓库不得有 `main` 或干净基座分支。
+- `repo_url`：bugfix 填 `bug<record>_green`，审核方按同 record 的 `_red` 查看 R1；diagnosis 在正式轨迹通过并 finalize 后填唯一的 `bug<record>_red`。两类 red 都必须包含对应 evaluator 的 `*_test.go`/testdata。仓库不得有 `main` 或干净基座分支。
 - 当前 Codex 完成的正确修复只保存在本地 `_gold/`，用于红绿校准、难度检查和回归验证，不创建远程分支、不进入收集表。
 - 一个 repo（GitHub 地址或本地路径任一命中）最多 30 条记录，每条一个不同 bug；总需求超过 30 条时拆到多个不同的 0-1 项目和 GitHub 仓库，每仓独立从 001 编号。
 - 同一个 bug 只能出一个 task_type：bugfix 或 diagnosis 二选一。
