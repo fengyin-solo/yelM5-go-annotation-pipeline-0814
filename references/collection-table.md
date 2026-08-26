@@ -63,4 +63,5 @@ success_criteria | verify_result | harness | generator_model | 做题人 | 创�
 - `collection_table.py sync` 产出：
   - 全局一份：`<root>/_shared/收集表_汇总.xlsx`
   - 项目独立一份：`<project>/收集表_<project>.xlsx`
+- `post_qc.py` 全绿后，`platform_submit.py` 从汇总表选取本次 `bug_id + session id` 对并提交；台账与回执分别写入 `<root>/_shared/platform-submissions.json` 和 `platform-submit-result.json`。
 - 本地 jsonl 轨迹存 `<project>/trajectory.jsonl`，每个项目独立。

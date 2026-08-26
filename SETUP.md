@@ -112,7 +112,7 @@ python3 /path/to/技能/scripts/configure.py check
 python3 <skill>/scripts/configure.py check
 ```
 
-### 必填项（4 个）
+### 必填项（6 个）
 
 | 配置项 | 是什么 | 怎么填 |
 |---|---|---|
@@ -120,6 +120,8 @@ python3 <skill>/scripts/configure.py check
 | `--github-token` | GitHub Personal Access Token | 在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 `repo`（含 `delete_repo`，脚本要建/删 public 仓库） |
 | `--git-name` | git 提交作者名 | 任意真实姓名/昵称，**不能是 `PINRU Local`** |
 | `--git-email` | git 提交作者邮箱 | 你的邮箱 |
+| `--platform-username` | `go.jzxhnh.com` 标注平台账号 | 用于后置质检通过后自动提交合格数据 |
+| `--platform-password` | `go.jzxhnh.com` 标注平台密码 | 以明文保存在权限 `600` 的本机配置文件，不进技能目录 |
 
 ### 可选但建议填（1 个）
 
@@ -154,7 +156,9 @@ python3 <skill>/scripts/configure.py setup \
   --github-token <ghp_xxx> \
   --git-name <作者名> \
   --git-email <作者邮箱> \
-  --cos-cookie <cos_uploader_sid>
+  --cos-cookie <cos_uploader_sid> \
+  --platform-username <标注平台账号> \
+  --platform-password <标注平台密码>
 ```
 
 #### 方式 3：环境变量
@@ -165,6 +169,8 @@ export GITHUB_TOKEN=<...>
 export GIT_AUTHOR_NAME=<...>
 export GIT_AUTHOR_EMAIL=<...>
 export COS_UPLOADER_SID=<...>     # 可选
+export GOQA_USERNAME=<...>
+export GOQA_PASSWORD=<...>
 export CLAUDE_BIN=<...>           # 可选
 
 python3 <skill>/scripts/configure.py setup
@@ -200,6 +206,7 @@ python3 <skill>/scripts/configure.py show
 | rsync | 轨迹失败回滚快照 | `brew install rsync` |
 | claude | 跑 Claude Code 轨迹 | `npm install -g @anthropic-ai/claude-code` |
 | Python openpyxl | 生成收集表 xlsx | `python3 -m pip install openpyxl` |
+| Python requests | 登录并提交标注平台 | `python3 -m pip install requests` |
 | docker（可选） | 本机容器验证 | Docker Desktop |
 
 ---
@@ -207,7 +214,10 @@ python3 <skill>/scripts/configure.py show
 ## 六、常见问题
 
 **Q：`configure.py setup` 报“缺少必填项”？**
-A：GitHub 用户名/token、git 作者名/邮箱这四项必须给全；COS cookie 和 claude 可选。
+A：GitHub 用户名/token、git 作者名/邮箱、标注平台账号/密码必须给全；COS cookie 和 claude 可选。旧 `push_go_label` 已配置时会自动兼容读取。
+
+**Q：只想生成本地产物，不要提交到标注平台？**
+A：运行 `batch_pipeline.py run/resume` 时加 `--skip-platform-submit`。默认流程只在 `post_qc` 全绿后提交。
 
 **Q：`github_project.py ensure` 报 401？**
 A：GitHub token 无效或权限不足，重新生成 token（勾 `repo`）后重跑 `configure.py setup`。

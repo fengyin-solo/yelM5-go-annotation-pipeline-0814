@@ -11,11 +11,11 @@ from pathlib import Path
 from resource_lock import lock_name, resource_lock
 
 
-PIPELINE_SCHEMA = 1
+PIPELINE_SCHEMA = 2
 STAGES = (
     "prepared", "preflight_passed", "g1_published", "red_passed",
     "main_running", "main_accepted", "green_passed", "finalized",
-    "uploaded", "done",
+    "uploaded", "qc_passed", "platform_submitted", "done",
 )
 
 

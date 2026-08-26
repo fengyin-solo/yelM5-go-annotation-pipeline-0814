@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_preflight import declared_version, lc_uuid_required, preflight_project, toolchain_canary  # noqa: E402
 from batch_state import atomic_json, input_fingerprint, iter_projects, load_json, update_status  # noqa: E402
+from platform_submit import format_submission_summary, identity_key  # noqa: E402
 from resource_lock import lock_name, resource_lock  # noqa: E402
 
 
@@ -371,7 +372,72 @@ def upload_one(project: Path, root: Path, args) -> None:
         mark(project, "uploaded")
 
 
+def completed_platform_records(projects: list[Path], ledger_path: Path) -> list[dict]:
+    entries = load_json(ledger_path).get("submissions", {})
+    records = []
+    for project in projects:
+        data = collection(project)
+        bug_id = str(data.get("bug_id") or "")
+        session_id = str(data.get("session_id") or "")
+        entry = entries.get(identity_key((bug_id, session_id))) or {}
+        if entry.get("state") != "submitted" or not entry.get("submission_id"):
+            raise RuntimeError(
+                f"platform stage/ledger mismatch for {project.name}; inspect {ledger_path} before continuing"
+            )
+        records.append({
+            "bug_id": bug_id,
+            "session_id": session_id,
+            "state": "skipped",
+            "submission_id": entry["submission_id"],
+            "status": entry.get("status"),
+        })
+    return records
+
+
+def submit_platform(projects: list[Path], root: Path, args) -> dict:
+    pending = [project for project in projects if not stage_passed(project, "platform_submitted")]
+    completed = [project for project in projects if project not in pending]
+    workbook = root / "_shared" / "收集表_汇总.xlsx"
+    ledger_path = root / "_shared" / "platform-submissions.json"
+    result_path = root / "_shared" / "platform-submit-result.json"
+    records = completed_platform_records(completed, ledger_path) if completed else []
+    if not pending:
+        return {"submitted": 0, "skipped": len(records), "records": records}
+    command_line = command(
+        "platform_submit.py", "submit",
+        "--xlsx", str(workbook),
+        "--ledger", str(ledger_path),
+        "--result", str(result_path),
+    )
+    requested = set()
+    for project in pending:
+        data = collection(project)
+        bug_id = str(data.get("bug_id") or "")
+        session_id = str(data.get("session_id") or "")
+        if not bug_id or not session_id:
+            raise RuntimeError(f"platform submission identity is incomplete: {project.name}")
+        requested.add((bug_id, session_id))
+        command_line.extend(["--record", bug_id, session_id])
+    submission_timeout = max(args.timeout, 300 * len(pending) + 120)
+    run_checked(command_line, cwd=root, timeout=submission_timeout)
+    result = load_json(result_path)
+    result_records = result.get("records") or []
+    returned = {(str(item.get("bug_id") or ""), str(item.get("session_id") or ""))
+                for item in result_records}
+    if returned != requested:
+        raise RuntimeError(f"platform result does not match requested records: {result_path}")
+    records.extend(result_records)
+    for project in pending:
+        mark(project, "platform_submitted")
+    return {
+        "submitted": sum(item.get("state") == "submitted" for item in records),
+        "skipped": sum(item.get("state") == "skipped" for item in records),
+        "records": records,
+    }
+
+
 def finish(projects: list[Path], root: Path, args) -> None:
+    platform_report = None
     with ThreadPoolExecutor(max_workers=max(1, args.upload_workers), thread_name_prefix="batch-upload") as pool:
         futures = {pool.submit(upload_one, p, root, args): p for p in projects}
         for future in as_completed(futures):
@@ -395,6 +461,13 @@ def finish(projects: list[Path], root: Path, args) -> None:
             qc_cmd.extend(["--date", args.date])
         run_checked(qc_cmd, cwd=root, timeout=max(args.timeout, 7200))
     for project in projects:
+        if not stage_passed(project, "qc_passed"):
+            mark(project, "qc_passed")
+    if getattr(args, "skip_platform_submit", False):
+        print("SKIP platform submission (--skip-platform-submit)")
+    else:
+        platform_report = submit_platform(projects, root, args)
+    for project in projects:
         with record_lock(project, root):
             if stage_passed(project, "done"):
                 continue
@@ -409,6 +482,8 @@ def finish(projects: list[Path], root: Path, args) -> None:
                                 "--date", project.parent.name, "--state", "done"), cwd=root, timeout=args.timeout)
             mark(project, "done")
     run_checked(command("repo_registry.py", "sync", "--root", str(root)), cwd=root, timeout=args.timeout)
+    if platform_report is not None:
+        print(format_submission_summary(platform_report))
 
 
 def status_report(projects: list[Path]) -> None:
@@ -439,6 +514,10 @@ def parse_args():
         command_parser.add_argument("--rerun-reason")
         command_parser.add_argument("--skip-docker", action="store_true")
         command_parser.add_argument("--skip-upload", action="store_true")
+        command_parser.add_argument(
+            "--skip-platform-submit", action="store_true",
+            help="complete local/COS delivery without submitting rows to go.jzxhnh.com",
+        )
         command_parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 

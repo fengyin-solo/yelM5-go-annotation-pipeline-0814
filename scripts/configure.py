@@ -26,6 +26,8 @@ setup 可用参数（都可省略，省略时回退到同名环境变量，再�
   --cos-cookie       COS 上传 cookie（cos_uploader_sid），跳过登录
   --cos-username     COS 上传站登录账号（与 --cos-password 一起自动登录拿 cookie，并保存供 cookie 过期时刷新）
   --cos-password     COS 上传站登录密码
+  --platform-username  go.jzxhnh.com 标注平台账号
+  --platform-password  go.jzxhnh.com 标注平台密码
   --claude           claude 可执行文件路径（默认 claude）
   --cos-base-url     COS 上传站地址（默认 https://upload.jzxhnh.com）
   --skip-verify      跳过 GitHub token / COS cookie 的联网校验
@@ -51,6 +53,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 GITHUB_CONTEXT = Path.home() / ".codex" / "pg-code" / "github-context.json"
 LOCAL_CONFIG_DIR = Path.home() / ".codex" / "go-annotation-pipeline"
 LOCAL_CONFIG = LOCAL_CONFIG_DIR / "config.json"
+LEGACY_PLATFORM_CONFIG = Path.home() / ".codex" / "push_go_label" / "config.json"
 REGISTRY_JSON = LOCAL_CONFIG_DIR / "used-repositories.json"
 REGISTRY_MD = LOCAL_CONFIG_DIR / "used-repositories.md"
 # 旧版存放位置（技能目录内），已弃用；reset 时一并备份清理，防止旧数据日后被重新迁移回来。
@@ -58,6 +61,7 @@ LEGACY_REGISTRY_JSON = SKILL_DIR / "references" / "used-repositories.json"
 LEGACY_REGISTRY_MD = SKILL_DIR / "references" / "used-repositories.md"
 
 DEFAULT_COS_BASE = "https://upload.jzxhnh.com"
+DEFAULT_PLATFORM_BASE = "https://go.jzxhnh.com"
 UA = "go-annotation-pipeline-configure/1.0"
 
 REQUIRED_DEPS = {
@@ -67,6 +71,7 @@ REQUIRED_DEPS = {
     "rsync": "rsync（轨迹失败回滚快照）",
     "claude": "Claude Code CLI（跑轨迹，可用 --claude 或 CLAUDE_BIN 覆盖）",
     "python-openpyxl": "python3 的 openpyxl 包（生成收集表 xlsx）",
+    "python-requests": "python3 的 requests 包（提交标注平台）",
 }
 OPTIONAL_DEPS = {
     "docker": "docker（本机容器验证，可选）",
@@ -79,6 +84,7 @@ INSTALL_HINTS = {
     "rsync": "brew install rsync",
     "claude": "npm install -g @anthropic-ai/claude-code",
     "python-openpyxl": "python3 -m pip install openpyxl",
+    "python-requests": "python3 -m pip install requests",
     "docker": "安装 Docker Desktop：https://www.docker.com/products/docker-desktop/",
 }
 
@@ -133,6 +139,15 @@ def load_local_config() -> dict:
     return {}
 
 
+def load_legacy_platform_config() -> dict:
+    if LEGACY_PLATFORM_CONFIG.exists():
+        try:
+            return json.loads(LEGACY_PLATFORM_CONFIG.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
 def save_local_config(data: dict):
     LOCAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     LOCAL_CONFIG.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -147,8 +162,8 @@ def save_local_config(data: dict):
 def check_dependencies() -> tuple[dict[str, bool], dict[str, bool]]:
     required, optional = {}, {}
     for name in REQUIRED_DEPS:
-        if name == "python-openpyxl":
-            required[name] = importlib.util.find_spec("openpyxl") is not None
+        if name.startswith("python-"):
+            required[name] = importlib.util.find_spec(name.removeprefix("python-")) is not None
         else:
             required[name] = shutil.which(name) is not None
     for name in OPTIONAL_DEPS:
@@ -193,13 +208,34 @@ def cos_cookie_status() -> tuple[bool, str]:
     return bool(sid), ("已配置" if sid else "未配置（上传轨迹前需配置，或手动 export COS_UPLOADER_SID）")
 
 
+def platform_credentials_status() -> tuple[bool, str]:
+    local = load_local_config()
+    legacy = load_legacy_platform_config()
+    username = (
+        os.environ.get("GOQA_USERNAME") or local.get("platform_username")
+        or legacy.get("username") or ""
+    )
+    password = (
+        os.environ.get("GOQA_PASSWORD") or local.get("platform_password")
+        or legacy.get("password") or ""
+    )
+    source = "主流水线配置" if local.get("platform_username") else (
+        "push_go_label 兼容配置" if legacy.get("username") else "环境变量"
+    )
+    if username and password:
+        return True, f"username={username}（{source}）"
+    return False, "未配置（默认批次收尾会提交平台）"
+
+
 def print_config_status():
     gh_ok, gh_msg = github_context_status()
     cos_ok, cos_msg = cos_cookie_status()
+    platform_ok, platform_msg = platform_credentials_status()
     print("\n配置自检：")
     print(f"  {'✅' if gh_ok else '❌'} GitHub 凭据：{gh_msg}")
     print(f"  {'✅' if cos_ok else '⚠️ '} COS 上传 cookie：{cos_msg}")
-    return gh_ok
+    print(f"  {'✅' if platform_ok else '❌'} 标注平台凭据：{platform_msg}")
+    return gh_ok and platform_ok
 
 
 # --------------------------------------------------------------------------- #
@@ -272,11 +308,11 @@ def cos_login(base_url: str, username: str, password: str) -> str | None:
 def cmd_check(_args):
     required, optional = check_dependencies()
     print_dependency_status(required, optional)
-    gh_ok = print_config_status()
+    config_ok = print_config_status()
 
     missing_required = any(not v for v in required.values())
     print()
-    if missing_required or not gh_ok:
+    if missing_required or not config_ok:
         print("运行 `python3 <skill>/scripts/configure.py setup ...` 补齐缺失项。")
         sys.exit(1)
     ok("依赖与必备配置齐全，可以开始生产数据。")
@@ -305,11 +341,21 @@ def cmd_show(_args):
     print(f"  cos_password     : {masked_cos_password}")
     print(f"  cos_base_url     : {cfg.get('cos_base_url') or DEFAULT_COS_BASE}")
     print(f"  claude_bin       : {cfg.get('claude_bin') or 'claude'}")
+    legacy = load_legacy_platform_config()
+    platform_username = cfg.get("platform_username") or legacy.get("username") or ""
+    platform_password = cfg.get("platform_password") or legacy.get("password") or ""
+    platform_source = "主流水线配置" if cfg.get("platform_username") else "push_go_label 兼容配置"
+    print(f"  platform_username : {platform_username or '(未配置)'}")
+    print(f"  platform_password : {'***' if platform_password else '(未配置)'}")
+    print(f"  platform_base_url : {cfg.get('platform_base_url') or legacy.get('base_url') or DEFAULT_PLATFORM_BASE}")
+    if platform_username:
+        print(f"  platform_source   : {platform_source}")
 
 
 def cmd_setup(args):
     existing_gh = load_github_context()
     existing_local = load_local_config()
+    legacy_platform = load_legacy_platform_config()
 
     gh_username = args.github_username or os.environ.get("GITHUB_USERNAME") or (existing_gh.get("github") or {}).get("username") or ""
     gh_token = args.github_token or os.environ.get("GITHUB_TOKEN") or (existing_gh.get("github") or {}).get("token") or ""
@@ -320,8 +366,23 @@ def cmd_setup(args):
     cos_cookie = args.cos_cookie or os.environ.get("COS_UPLOADER_SID") or existing_local.get("cos_uploader_sid") or ""
     cos_username = args.cos_username or os.environ.get("COS_USERNAME") or existing_local.get("cos_username") or ""
     cos_password = args.cos_password or os.environ.get("COS_PASSWORD") or existing_local.get("cos_password") or ""
+    platform_username = (
+        args.platform_username or os.environ.get("GOQA_USERNAME")
+        or existing_local.get("platform_username") or legacy_platform.get("username") or ""
+    )
+    platform_password = (
+        args.platform_password or os.environ.get("GOQA_PASSWORD")
+        or existing_local.get("platform_password") or legacy_platform.get("password") or ""
+    )
+    platform_base_url = (
+        args.platform_base_url or os.environ.get("GOQA_BASE_URL")
+        or existing_local.get("platform_base_url") or legacy_platform.get("base_url") or DEFAULT_PLATFORM_BASE
+    )
 
-    interactive = sys.stdin.isatty() and not (args.github_username or args.github_token or args.git_name or args.cos_cookie)
+    interactive = sys.stdin.isatty() and not (
+        args.github_username or args.github_token or args.git_name or args.cos_cookie
+        or args.platform_username or args.platform_password
+    )
 
     if interactive:
         print("首次配置向导（直接回车可保留已有值）\n")
@@ -336,6 +397,8 @@ def cmd_setup(args):
                 cos_username = _input("COS 登录账号", cos_username or None)
                 cos_password = _input("COS 登录密码", cos_password or None, secret=True)
                 cos_cookie = cos_login(cos_base_url, cos_username, cos_password) or ""
+        platform_username = _input("标注平台账号", platform_username or None)
+        platform_password = _input("标注平台密码", platform_password or None, secret=True)
 
     # 显式提供账号密码时立即登录刷新 cookie；没有现成 cookie 时也自动登录补齐。
     cos_login_requested = bool(args.cos_username or args.cos_password or (not cos_cookie and cos_username and cos_password))
@@ -351,14 +414,19 @@ def cmd_setup(args):
         missing.append("--git-name")
     if not git_email:
         missing.append("--git-email")
+    if not platform_username:
+        missing.append("--platform-username")
+    if not platform_password:
+        missing.append("--platform-password")
     if missing:
         fail("缺少必填项：" + "、".join(missing))
         print("\n非交互配置示例：")
         print("  python3 <skill>/scripts/configure.py setup \\")
         print("    --github-username <你的GitHub用户名> --github-token <ghp_xxx> \\")
         print("    --git-name <作者名> --git-email <作者邮箱> \\")
-        print("    [--cos-cookie <cos_uploader_sid> | --cos-username <u> --cos-password <p>]")
-        print("\n也支持环境变量：GITHUB_USERNAME / GITHUB_TOKEN / GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / COS_UPLOADER_SID / CLAUDE_BIN")
+        print("    [--cos-cookie <cos_uploader_sid> | --cos-username <u> --cos-password <p>] \\")
+        print("    --platform-username <u> --platform-password <p>")
+        print("\n也支持环境变量：GITHUB_USERNAME / GITHUB_TOKEN / GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / COS_UPLOADER_SID / GOQA_USERNAME / GOQA_PASSWORD / CLAUDE_BIN")
         sys.exit(1)
 
     if git_name == "PINRU Local":
@@ -396,6 +464,9 @@ def cmd_setup(args):
         local["cos_username"] = cos_username
     if cos_password:
         local["cos_password"] = cos_password
+    local["platform_username"] = platform_username
+    local["platform_password"] = platform_password
+    local["platform_base_url"] = platform_base_url
     local["claude_bin"] = claude_bin
     save_local_config(local)
 
@@ -457,6 +528,9 @@ def main():
     c.add_argument("--cos-username")
     c.add_argument("--cos-password")
     c.add_argument("--cos-base-url")
+    c.add_argument("--platform-username")
+    c.add_argument("--platform-password")
+    c.add_argument("--platform-base-url")
     c.add_argument("--claude")
     c.add_argument("--skip-verify", action="store_true")
     c.add_argument("--force", action="store_true")

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shutil
@@ -6,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +31,8 @@ class BatchPipelineTest(unittest.TestCase):
             "基于 Go 实现的设备状态服务，提供设备状态写入与查询 API。\n", encoding="utf-8"
         )
         (project / "collection.json").write_text(json.dumps({
-            "bug_id": "demo-001", "task_type": "bugfix", "bug_category": "error异常错误",
+            "bug_id": "demo-001", "session_id": "00000000-0000-4000-8000-000000000001",
+            "task_type": "bugfix", "bug_category": "error异常错误",
             "user_query": "当前项目就可以了，帮我修好这个问题。",
             "verify_cmds": "go test ./internal/demo -run '^TestDemo$' -count=1",
         }, ensure_ascii=False), encoding="utf-8")
@@ -95,9 +98,28 @@ class BatchPipelineTest(unittest.TestCase):
             root = Path(tmp)
             projects = [self.make_project(root)]
             calls = []
+
+            def fake_run(cmd, **_kwargs):
+                calls.append(cmd)
+                if "platform_submit.py" in " ".join(cmd):
+                    result_path = Path(cmd[cmd.index("--result") + 1])
+                    result_path.parent.mkdir(parents=True, exist_ok=True)
+                    result_path.write_text(json.dumps({
+                        "submitted": 1,
+                        "skipped": 0,
+                        "records": [{
+                            "bug_id": "demo-001",
+                            "session_id": "00000000-0000-4000-8000-000000000001",
+                            "state": "submitted",
+                            "submission_id": "submission-1",
+                        }],
+                    }), encoding="utf-8")
+                return ""
+
+            output = io.StringIO()
             with patch.object(batch_pipeline, "upload_one"), patch.object(
-                batch_pipeline, "run_checked", side_effect=lambda cmd, **kwargs: calls.append(cmd) or ""
-            ), patch.object(batch_pipeline, "mark"):
+                batch_pipeline, "run_checked", side_effect=fake_run
+            ), patch.object(batch_pipeline, "mark"), redirect_stdout(output):
                 args = type("Args", (), {
                     "upload_workers": 3, "timeout": 1, "workers": 3,
                     "date": None, "projects": None,
@@ -107,6 +129,38 @@ class BatchPipelineTest(unittest.TestCase):
             registry_sync = [cmd for cmd in calls if "repo_registry.py" in " ".join(cmd) and "sync" in cmd]
             self.assertEqual(1, len(sync_calls))
             self.assertEqual(1, len(registry_sync))
+            platform_calls = [cmd for cmd in calls if "platform_submit.py" in " ".join(cmd)]
+            self.assertEqual(1, len(platform_calls))
+            qc_index = next(i for i, cmd in enumerate(calls) if "post_qc.py" in " ".join(cmd))
+            platform_index = next(i for i, cmd in enumerate(calls) if "platform_submit.py" in " ".join(cmd))
+            registry_index = next(i for i, cmd in enumerate(calls) if "repo_registry.py" in " ".join(cmd))
+            self.assertLess(qc_index, platform_index)
+            self.assertLess(platform_index, registry_index)
+            self.assertEqual(
+                "平台上传摘要：\n上传成功：1 条\n跳过：0 条\n提交 ID：\n- demo-001：submission-1",
+                output.getvalue().strip(),
+            )
+
+    def test_completed_platform_stage_is_summarized_as_skipped_without_resubmission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = self.make_project(root)
+            update_status(project, stage="platform_submitted")
+            ledger = root / "_shared" / "platform-submissions.json"
+            ledger.parent.mkdir(parents=True)
+            key = batch_pipeline.identity_key((
+                "demo-001", "00000000-0000-4000-8000-000000000001",
+            ))
+            ledger.write_text(json.dumps({"submissions": {key: {
+                "state": "submitted", "submission_id": "submission-1", "status": "pending",
+            }}}), encoding="utf-8")
+            args = type("Args", (), {"timeout": 1})()
+            with patch.object(batch_pipeline, "run_checked") as run:
+                report = batch_pipeline.submit_platform([project], root, args)
+            run.assert_not_called()
+            self.assertEqual(0, report["submitted"])
+            self.assertEqual(1, report["skipped"])
+            self.assertEqual("submission-1", report["records"][0]["submission_id"])
 
     def test_model_phases_run_two_records_at_a_time(self):
         with tempfile.TemporaryDirectory() as tmp:

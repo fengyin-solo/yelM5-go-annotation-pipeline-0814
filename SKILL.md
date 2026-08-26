@@ -1,6 +1,6 @@
 ---
 name: yelM5-红绿轨迹-最新-go-annotation-pipeline-0814
-description: 生产「Go 语言 × Bugfix/问题排查」模型训练数据的完整流水线（0-1 自建项目埋 bug，GitHub repo_url 分支交付）。当用户需要出题、埋 bug、写题面、红绿校准、跑 Claude Code 轨迹、质检轨迹或填写数据收集表时使用。首次使用或说「配置技能/初始化配置」时，先运行 scripts/configure.py。
+description: 生产「Go 语言 × Bugfix/问题排查」模型训练数据的完整流水线（0-1 自建项目埋 bug，GitHub repo_url 分支交付，质检合格后提交收集表到 go.jzxhnh.com）。当用户需要出题、埋 bug、写题面、红绿校准、跑 Claude Code 轨迹、质检轨迹或填写/提交数据收集表时使用。首次使用或说「配置技能/初始化配置」时，先运行 scripts/configure.py。
 ---
 
 # Go 标注数据生产流水线（0-1 自建项目版）
@@ -16,7 +16,7 @@ description: 生产「Go 语言 × Bugfix/问题排查」模型训练数据的�
 > 触发词：配置技能 / 初始化配置 / 首次配置 / 帮我配置流水线。此后本技能所有脚本会自动读取已配置项。
 
 ```bash
-# 1) 自检：看缺什么（依赖 + GitHub 凭据 + COS cookie）
+# 1) 自检：看缺什么（依赖 + GitHub/COS/标注平台凭据）
 python3 <skill>/scripts/configure.py check
 
 # 2) 写入配置（交互式：在本地终端直接运行）
@@ -29,6 +29,8 @@ python3 <skill>/scripts/configure.py setup \
   --git-name <提交作者名> \
   --git-email <提交作者邮箱> \
   --cos-cookie <cos_uploader_sid> \
+  --platform-username <标注平台账号> \
+  --platform-password <标注平台密码> \
   # 没有 cookie 时也可自动登录：--cos-username <上传站账号> --cos-password <上传站密码>
 
 # 3) 查看配置（token/cookie 脱敏显示）
@@ -46,9 +48,10 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 | GitHub 用户名 / Token | `github_project.py` 据此自动创建 **public** repo；Token 需勾选 `repo`（含 delete_repo）权限 | `~/.codex/pg-code/github-context.json`（与 pg-code 技能共用） |
 | git 作者名 / 邮箱 | 提交时 author/committer；**名不能是 `PINRU Local`** | 同上 |
 | COS 上传 cookie | 上传轨迹到 `upload.jzxhnh.com`；用 `--cos-cookie` 或账号密码自动登录获取；保存账号密码后，上传遇到 cookie 过期会自动刷新并重试一次 | `~/.codex/go-annotation-pipeline/config.json` |
+| 标注平台账号/密码 | `post_qc` 全绿后把本次合格行提交到 `go.jzxhnh.com`；兼容读取旧 `push_go_label` 配置 | 优先 `~/.codex/go-annotation-pipeline/config.json`，兼容 `~/.codex/push_go_label/config.json` |
 | claude 路径 | Claude Code CLI；默认 `claude`，自定义时用 `--claude` | 同上 |
 
-必备外部依赖（`configure.py check` 会自动列出）：`git`、`curl`、`go`、`rsync`、`claude`、Python `openpyxl`；`docker` 可选（只影响本机容器验证）。
+必备外部依赖（`configure.py check` 会自动列出）：`git`、`curl`、`go`、`rsync`、`claude`、Python `openpyxl` / `requests`；`docker` 可选（只影响本机容器验证）。
 
 > 更多安装与分享说明见 [SETUP.md](SETUP.md)。
 
@@ -79,7 +82,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 6. **Docker 验证 + 项目简介 + 发布 GitHub**（跑轨迹前）→ 产出 repo_url
 7. **无测试跑修复轨迹**（Claude Code 干净 session）→ 脚本用系统临时隔离副本运行，副本中没有任何 `*_test.go`，模型只收到 `prompt.txt` 原文
 8. **轨迹质检四查** → `cheat/suspect/clean` 防作弊审计；仅 bugfix 继续私有绿灯并 `finalize` 生成 G2/R1
-9. **填收集表 + 上传轨迹 + 收尾登记** → 产出 collection
+9. **填收集表 + 上传轨迹 + 后置质检 + 平台提交 + 收尾登记** → 产出 collection 和 submission_id
 
 > 「附:红/绿证据轨迹」中红灯在第 6→7 步之间；仅 bugfix 在第 8 步四查通过后、8.1 finalize 之前跑绿灯。G2/R1 在 finalize 之前不得存在。
 
@@ -91,6 +94,8 @@ python3 <skill>/scripts/configure.py reset-registry --yes
     used-repositories.json      #   全局已用仓库镜像（repo_registry.py sync 生成）
     used-repositories.md
     收集表_汇总.xlsx             #   全局汇总填表数据（一条一行）
+    platform-submissions.json  #   平台提交幂等台账（逐条 submission_id）
+    platform-submit-result.json #  本次平台提交结果
   _gold/                        # 出题人私有答案区（gold 模型正确代码；不交付、不进 git）
     <name>__<record>/           #   每条记录一份 gold 修复后的代码
   _repos/                       # 每个 0-1 项目一个 central git repo（github_project.py 管理）
@@ -122,7 +127,8 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 
 ```text
 prepared -> preflight_passed -> g1_published -> red_passed -> main_running
--> main_accepted -> green_passed -> finalized -> uploaded -> done
+-> main_accepted -> green_passed -> finalized -> uploaded -> qc_passed
+-> platform_submitted -> done
 ```
 
 ## 常用脚本（均在本期根目录下执行）
@@ -146,6 +152,7 @@ prepared -> preflight_passed -> g1_published -> red_passed -> main_running
 | `python3 <skill>/scripts/configure.py` | 首次配置向导：`check` 自检 / `setup` 写配置 / `show` 查看 / `reset-registry` 清空已用清单 |
 | `python3 <skill>/scripts/domain_guard.py` | 禁止项目/功能点最低门禁：建仓和埋错前检查项目描述、仓库名、README 与候选功能点；通过后仍须人工语义审查 |
 | `python3 <skill>/scripts/post_qc.py` | **后置质检**：默认核对输入指纹绑定的运行证据、隐私、文件、字段、轨迹和仓库拓扑，不重复执行 build/红绿命令；仅排障时加 `--recheck-runtime` |
+| `python3 <skill>/scripts/platform_submit.py` | 整表先校验，再按本次 bug_id/session_id 提交到标注平台；使用原子台账断点恢复并防重 |
 | `python3 <skill>/scripts/batch_pipeline.py` | 推荐批次入口：`preflight` / `run` / `resume` / `status`，负责一次性预检、状态恢复、自动流转、本地并发和批末集中同步 |
 | `python3 <skill>/scripts/batch_preflight.py` | 单独批次预检：工具链 canary、输入指纹、无原始测试 evaluator 编译、diagnosis 验收器自检、20/20 红绿校准和目标断言到达；逐文件回退按题目需要选用 |
 
@@ -169,6 +176,7 @@ python3 <skill>/scripts/batch_pipeline.py status --root .
 - diagnosis 在 PreToolUse 就禁止 Edit/Write 和明确 Bash 写操作，跑后仍做零 diff 与「文件/符号/机制」根因语义验收。
 - 证据轨迹先本地生成，通过质量门禁后并发上传；Excel 和注册表各只在批末重建一次，并分别用跨进程写锁保护。
 - `--skip-upload` 会留下完整本地产物；后续 `resume` 只补上传和同步，不重跑测试模型。
+- 默认在整批 `post_qc` 通过后把本次记录提交到标注平台；只做本地/COS 交付时显式加 `--skip-platform-submit`。指定 `--project` 或 `resume` 时不会重传汇总表里的其他记录。
 
 ## 第 1 步：选题准备（0-1 项目 + 去重）
 
@@ -561,7 +569,7 @@ python3 <skill>/scripts/github_project.py finalize \
 
 diagnosis 题不执行 finalize，只保留 publish 创建的 orphan red 单提交，且不得出现 green。`push-fix` 仅作旧命令兼容入口，新流程统一使用 `finalize`。
 
-## 第 9 步：填收集表 + 上传轨迹 + 收尾登记
+## 第 9 步：填收集表 + 上传轨迹 + 质检 + 平台提交 + 收尾登记
 
 ### 9.1 填收集表（21 字段）
 
@@ -611,24 +619,9 @@ python3 <skill>/scripts/configure.py setup --cos-username <账号> --cos-passwor
 
 上传完成后再 `collection_table.py sync --root .`，保证汇总表与项目独立表里的 `trajectory` 列是最终 COS 链接。
 
-### 9.3 收尾登记
+### 9.3 后置质检（交付前硬校验，平台提交前必跑）
 
-1. `workspace.py set --root . --project <name>__<record> --state done`
-2. 登记全局已用仓库/项目（`--github-url` 用 `ensure` 输出的 `repoUrl` 完整地址，即真实项目名的仓库地址）：
-
-```bash
-# 优先用 GitHub 地址
-python3 <skill>/scripts/repo_registry.py register <repo|url> --source auto \
-  --github-url <github_url> --local-path <local_path> \
-  --project <name>__<record> --note "bug <bug_id>"
-python3 <skill>/scripts/repo_registry.py sync --root .
-```
-
-3. 确认已就位：`<project>/<session_id>.jsonl`、`collection.json`、项目 xlsx、`_delivery/g1_snapshot.json`、`_evidence/repository_delivery.json`以及 GitHub 交付分支（bugfix 为 green/red，diagnosis 仅 red）。
-
-### 9.4 后置质检（交付前硬校验，交付前必跑）
-
-整期所有记录都完成第 9.1–9.3 步后，在本期根目录执行：
+整期所有记录都完成第 9.1–9.2 步后，在本期根目录执行：
 
 ```bash
 python3 <skill>/scripts/post_qc.py --root . --workers 3
@@ -652,6 +645,48 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 > 交付前各项必须全绿；其中 repository 是防止模型通过 Git 历史或其他 bug 分支抄到答案的最后硬门禁。
 
 `post_qc.py` 默认用 3 个 worker 并发核对不同记录的留存证据，输出仍按记录名稳定排序；同一 repo 的远程分支元数据只查一次并复用。默认模式不会再次执行 Go build、私测或回归；只有证据缺失、指纹变化或排障时才使用 `--recheck-runtime`。旧的已 finalize 记录没有 `pipeline_schema: 2` 时按旧证据兼容复核；新正式轨迹由脚本自动写入 schema 2，不得缺契约和自动验收文件。
+
+### 9.4 提交合格行到标注平台
+
+`batch_pipeline.py run/resume` 默认在 9.3 全绿后调用：
+
+```bash
+python3 <skill>/scripts/platform_submit.py submit \
+  --xlsx ./_shared/收集表_汇总.xlsx \
+  --ledger ./_shared/platform-submissions.json \
+  --result ./_shared/platform-submit-result.json
+```
+
+- 批处理会通过重复的 `--record <bug_id> <session_id>` 只选本次项目，不会把汇总表里旧的 `done` 记录重传。
+- 网络前先整批校验；任一行错误则零提交。平台请求使用 TLS 1.2 兼容当前服务器。
+- 每条请求发出前先将 `in_flight` 原子写入台账，成功后立即记录 `submission_id`；`resume` 只补未成功项。
+- `in_flight` / `uncertain` 表示服务端可能已收到请求；默认停止自动重试。必须先在平台核对，确认未提交时才可人工加 `--retry-uncertain`。
+- 只做本地/COS 交付时，对 `batch_pipeline.py` 加 `--skip-platform-submit`。可用 `platform_submit.py check` 或 `submit --dry-run` 做零网络校验。
+- 平台提交成功后，整个批处理的最终输出必须固定以下面的中文摘要收尾；断点续跑已提交记录计入“跳过”，但仍必须列出台账中的提交 ID：
+
+```text
+平台上传摘要：
+上传成功：<N> 条
+跳过：<M> 条
+提交 ID：
+- <bug_id>：<submission_id>
+```
+
+### 9.5 收尾登记
+
+只有默认流程的平台提交完成，或用户显式使用 `--skip-platform-submit` 时，才执行：
+
+1. `workspace.py set --root . --project <name>__<record> --state done`
+2. 登记全局已用仓库/项目（`--github-url` 用 `ensure` 输出的 `repoUrl` 完整地址）：
+
+```bash
+python3 <skill>/scripts/repo_registry.py register <repo|url> --source auto \
+  --github-url <github_url> --local-path <local_path> \
+  --project <name>__<record> --note "bug <bug_id>"
+python3 <skill>/scripts/repo_registry.py sync --root .
+```
+
+3. 确认已就位：`<project>/<session_id>.jsonl`、`collection.json`、项目 xlsx、`_delivery/g1_snapshot.json`、`_evidence/repository_delivery.json`、平台台账/结果以及 GitHub 交付分支（bugfix 为 green/red，diagnosis 仅 red）。
 
 ## 腾讯文档粘贴注意
 
