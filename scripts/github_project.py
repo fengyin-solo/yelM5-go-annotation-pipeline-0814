@@ -47,6 +47,11 @@ from trajectory_guard import (  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_docker import make_dockerfile, detect_go_version, find_go_mod  # noqa: E402
+from change_scope import (  # noqa: E402
+    MIN_FUNCTIONAL_CHANGED_LINES,
+    functional_go_diff_from_numstat,
+    meets_minimum_functional_change,
+)
 from domain_guard import validate_project_domain  # noqa: E402
 from project_summary import read_project_summary, validate_project_summary  # noqa: E402
 from resource_lock import lock_name, resource_lock  # noqa: E402
@@ -791,12 +796,17 @@ def _cmd_finalize_unlocked(args):
     sync_bug_source(env_dir, repo)
     ensure_delivery_files(repo, proj_name, read_project_summary(proj), getattr(args, "module_path", None))
     _assert_root_delivery_files(repo)
-    business_changes = [
-        name for name in run_git(repo, "diff", "--name-only", g1_sha, "--", ".").stdout.splitlines()
-        if not name.endswith("_test.go") and name not in DELIVERY_ROOT_FILES and not name.lower().endswith((".md", ".txt"))
-    ]
-    if not business_changes:
-        raise RuntimeError("G2 没有模型产生的功能代码改动，拒绝 finalize")
+    # Make newly created files visible to diff without staging their contents yet.
+    run_git(repo, "add", "-N", "--", ".")
+    model_files, model_lines = functional_go_diff_from_numstat(
+        run_git(repo, "-c", "core.quotePath=false", "diff", "--numstat", g1_sha, "--", ".").stdout
+    )
+    if not meets_minimum_functional_change(model_files, model_lines):
+        run_git(repo, "reset", "--mixed", g1_sha)
+        raise RuntimeError(
+            f"模型最终补丁只有 {model_files} 个功能 Go 文件、{model_lines} 行增删；"
+            f"至少需要 1 个文件、{MIN_FUNCTIONAL_CHANGED_LINES} 行，拒绝 finalize"
+        )
     copied_tests = copy_evaluator_to_repo(evaluator, repo)
     run_git(repo, "add", "-A", "--", ".")
     if not run_git(repo, "diff", "--cached", "--name-only").stdout.strip():
@@ -842,6 +852,8 @@ def _cmd_finalize_unlocked(args):
         "r1_commit": r1_sha,
         "session_id": data.get("session_id") or "",
         "test_files": copied_tests,
+        "model_functional_files": model_files,
+        "model_functional_lines": model_lines,
         "finalized_at": datetime.now(timezone.utc).isoformat(),
     })
     print(json.dumps({

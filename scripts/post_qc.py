@@ -8,7 +8,7 @@
   0. preflight   新批次必须有 20/20 红绿和目标断言证据；回退证据按题目需要选用
   1. privacy     目标测试只存在私有 evaluator，env 和初始 Bug 基线不得包含
   2. runtime     核对 preflight/Docker 留存的 build、红绿校准证据；仅显式要求时复跑
-  3. scope       功能代码至少改动 1 个文件、5 行；更高规模不作为难度门禁
+  3. scope       gold 与模型最终补丁都至少改动 1 个功能 Go 文件、5 行
   6. files       轨迹、project_summary.txt、collection.json 齐全，且无 BUG_REPRO.md
   7. fields      collection.json 必填字段齐全（bugfix: verify_cmds/verify_result；
                  diagnosis: verify_cmds/gold_root_cause/verify_result）
@@ -49,7 +49,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trajectory_guard import evaluator_files, inject_evaluator, is_test_artifact, private_test_issues, source_manifest  # noqa: E402
 from batch_state import input_fingerprint  # noqa: E402
 from bug_identity import bug_id_for_project  # noqa: E402
-from change_scope import MIN_FUNCTIONAL_CHANGED_LINES, meets_minimum_functional_change  # noqa: E402
+from change_scope import (  # noqa: E402
+    MIN_FUNCTIONAL_CHANGED_LINES,
+    functional_go_diff_dirs,
+    functional_go_diff_revisions,
+    meets_minimum_functional_change,
+)
 from project_summary import read_project_summary  # noqa: E402
 
 
@@ -226,27 +231,7 @@ def project_tests(proj: Path) -> set[str]:
 
 def functional_diff_scope(buggy: Path, gold: Path) -> tuple[int, int]:
     """返回 gold 修复涉及的功能文件数和增删总行数。"""
-    r = subprocess.run(
-        ["git", "-c", "core.quotePath=false", "diff", "--no-index", "--numstat",
-         str(buggy), str(gold)],
-        capture_output=True, text=True,
-    )
-    files = 0
-    lines = 0
-    for row in r.stdout.splitlines():
-        parts = row.split("\t", 2)
-        if len(parts) != 3:
-            continue
-        added, deleted, path = parts
-        normalized = path.lower().replace("\\", "/")
-        name = normalized.rsplit("/", 1)[-1]
-        if not name.endswith(".go") or name.endswith("_test.go"):
-            continue
-        if not added.isdigit() or not deleted.isdigit():
-            continue
-        files += 1
-        lines += int(added) + int(deleted)
-    return files, lines
+    return functional_go_diff_dirs(buggy, gold)
 
 
 def verify_result_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool, str]:
@@ -372,6 +357,17 @@ def repository_delivery_ok(proj: Path, coll: dict, task_type: str) -> tuple[bool
         if green_count != 2:
             issues.append("bugfix green 必须恰好是 G1 -> G2 两个提交")
         g1 = _git(repo, "rev-parse", f"{green}^").stdout.strip() if green_count >= 2 else ""
+        if g1:
+            model_files, model_lines = functional_go_diff_revisions(repo, g1, g2)
+            if not meets_minimum_functional_change(model_files, model_lines):
+                issues.append(
+                    f"模型最终补丁只有 {model_files} 个功能 Go 文件、{model_lines} 行增删；"
+                    f"至少需要 1 个文件、{MIN_FUNCTIONAL_CHANGED_LINES} 行"
+                )
+            if meta.get("model_functional_files") not in (None, model_files):
+                issues.append("模型功能改动文件数与交付元数据不一致")
+            if meta.get("model_functional_lines") not in (None, model_lines):
+                issues.append("模型功能改动行数与交付元数据不一致")
         if _git(repo, "rev-parse", "--verify", red, check=False).returncode != 0:
             issues.append(f"缺少 red 分支 {red}")
         else:

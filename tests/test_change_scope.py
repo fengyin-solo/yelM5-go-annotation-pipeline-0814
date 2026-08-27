@@ -9,6 +9,7 @@ sys.path.insert(0, str(SCRIPTS))
 from change_scope import meets_minimum_functional_change  # noqa: E402
 from batch_preflight import _functional_diff  # noqa: E402
 from post_qc import functional_diff_scope  # noqa: E402
+from run_trajectory import validate_task  # noqa: E402
 
 
 class ChangeScopeTest(unittest.TestCase):
@@ -50,6 +51,36 @@ class ChangeScopeTest(unittest.TestCase):
             )
             self.assertEqual((0, 0), _functional_diff(buggy, gold))
             self.assertEqual((0, 0), functional_diff_scope(buggy, gold))
+
+    def test_model_patch_under_five_lines_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            workspace = root / "workspace"
+            snapshot.mkdir()
+            workspace.mkdir()
+            (snapshot / "main.go").write_text(
+                "package demo\n\nvar a = 1\nvar b = 2\n", encoding="utf-8"
+            )
+            (workspace / "main.go").write_text(
+                "package demo\n\nvar a = 3\nvar b = 4\n", encoding="utf-8"
+            )
+            issues = validate_task(workspace, snapshot, "bugfix")
+            self.assertTrue(any("4 行增删" in issue for issue in issues), issues)
+
+    def test_model_patch_at_five_lines_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            workspace = root / "workspace"
+            snapshot.mkdir()
+            workspace.mkdir()
+            (snapshot / "main.go").write_text("package demo\n", encoding="utf-8")
+            (workspace / "main.go").write_text(
+                "package demo\n\nvar a = 1\nvar b = 2\nvar c = 3\nvar d = 4\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], validate_task(workspace, snapshot, "bugfix"))
 
 
 if __name__ == "__main__":

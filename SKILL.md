@@ -67,7 +67,7 @@ python3 <skill>/scripts/configure.py reset-registry --yes
 8. **Docker 验证和 G1 发布必须在跑轨迹前完成；G2/R1 只能在轨迹、私有绿灯和全量回归通过后创建**。不得远程发布 `main`、干净基座、gold 或其他可用于反推答案的分支。
 9. **GitHub 仓库名用真实项目名，长度 3-5 个英文单词**：用「领域 + 用途 + 类型」拼成描述性名字（如 `sensor-telemetry-ingestion-service`），既具体又不至于重名；不加 `go-` 前缀、不加随机码、不出现 `test`/`fix` 等字样；本地项目名用领域命名，别用 `forex` 这类泛化名。
 10. **`verify_cmds` 对 bugfix / diagnosis 都必填，且只能是目标 Bug 的定向复现命令**：明确写出唯一目标包、精确测试名和 `-count=1`（并发类加 `-race`），禁止 `go test ./...`、通配包、当前目录、多包或拼接全量回归；命令对应的测试必须完整覆盖 `user_query` 描述的全部现象与触发条件。红、绿证据轨迹都必须**只实际执行一次**这条命令，实际 Bash 调用、最终回复【命令】和正式填表的 `verify_cmds` 必须逐字符完全相同，空格、路径写法、引号、参数顺序均不得变化；bugfix 校验红+绿，diagnosis 校验红。
-11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。bugfix 的 gold 必须改动至少 1 个功能 Go 文件，功能代码增删总行数至少 5 行；达到最低规模后，文件数和行数只作辅助信息，不作为更高的通用难度门禁。
+11. **Bug 难度由真实故障链决定**：至少涉及 1 个 Go 运行时机制、2 个相关模块/包，并依赖调用顺序、并发交错、请求生命周期或状态转换才能完整触发。bugfix 有两次独立的最低改动门禁：gold 相对 Bug 基线、模型最终补丁相对 G1，都必须改动至少 1 个功能 Go 文件且功能代码增删总行数至少 5 行；任一不足都不能交付。达到最低规模后，文件数和行数只作辅助信息，不作为更高的通用难度门禁。
 12. **禁止用规模冒充难度**：纯索引/边界/容量计算、单字段映射、单比较符、单 `%w`、单 nil 判断、单状态漏边等局部错误通常不合格；但是否合格以真实定位难度、故障传播和测试证据判断，不要求人为扩写到超过 5 行的固定规模或固定文件数。
 13. **禁止项目/功能点门禁优先于埋错和难度设计**：查账账务与订单类为最高优先级禁区，完整清单见 [references/forbidden-domains.md](references/forbidden-domains.md)。项目总体允许不代表每个功能点都允许；任一单条功能点命中禁区就立即换题，不得先埋错再靠改写 `user_query` 规避。
 14. **`bug_id` 固定为批次根目录名 + `-` + 三位 record**：record 仅从记录目录末尾 `__NNN` 取值，前缀必须取 `--root` 指向目录的 basename，不得从 repo 名、GitHub 仓库名或记录目录主体派生。例如批次根目录为 `55-connection-pool【10】`、记录目录为 `connection-pool-observability-service__001` 时，`bug_id` 必须为 `55-connection-pool【10】-001`，保留批次根目录名的原始字符。
@@ -480,6 +480,7 @@ python3 <skill>/scripts/github_project.py publish \
 - **工具执行前越界守卫（红线）**：脚本通过 Claude `PreToolUse` hook 在 Bash/Read/Edit/Write/Glob/Grep 真正执行前拦截工作区外、`.git`、`_gold`、`evaluator`和证据目录。不向 system prompt 或 user prompt 注入任何文字；轨迹会区分“已被 hook 拦截的尝试”与“实际越界成功”。
 - **模型正式轨迹不执行 `verify_cmds`（红线）**：模型可以 build、运行业务程序或做普通定位，但目标测试不对模型可见。模型结束后，脚本才在独立临时副本注入 evaluator 执行验收。
 - **自动验收后才同步**：一轮模型成功结束后，本地并发执行轨迹分析、私有 `verify_cmds`、`go test ./...`和任务语义/基线 diff，写入 `_evidence/trajectory_acceptance.json`。任一项失败立即停止，显示原始断言，不消耗后续模型重试；全部通过后才同步 `env/`并自动绑定 `collection.json.session_id`。
+- **模型补丁 5 行门禁（红线）**：bugfix 正式轨迹结束后，按无测试 G1 快照与模型最终 workspace 的 `git diff --numstat` 统计非 `*_test.go` 的 Go 源码，至少改动 1 个文件且增删总数至少 5 行。少于 5 行视为本轮结果不合格，回滚后重新跑；测试、文档、配置和交付文件不能补足该数量。
 - 无头模式轨迹最干净，并且必须把 `prompt.txt` 原文作为唯一一条 user 消息回放进轨迹，保证轨迹文件内能看到题面原文（下面的 stdout 重定向只是运行时校验用，交付文件由脚本从 `~/.claude/projects/` 取原始 session 文件）：
 
 ```bash
@@ -537,6 +538,7 @@ python3 <skill>/scripts/analyze_trajectory.py <project>/trajectory.jsonl
 - 模型修复写法与 gold 修复不同是常态，**只验证公开行为**。
 - bugfix 的 `verify_cmds` 必须使用 `-count=1`；稳定性校准重复执行该定向命令 20 次并全部通过，再单独执行 `go test ./...` 检查全量无回归。全量命令不得写入 `verify_cmds`。
 - diff 环境目录与 base 快照，确认只改了该改的文件。
+- bugfix 同时确认模型最终补丁相对 G1 至少有 5 行功能 Go 代码增删；这与出题阶段 gold 相对 Bug 基线的 5 行门禁是两次不同检查，不能互相替代。
 
 防作弊脚本输出三档：
 
@@ -564,6 +566,7 @@ python3 <skill>/scripts/github_project.py finalize \
 
 脚本会：
 
+- finalize 再次按 G1 与模型最终代码的真实 diff 核验至少 1 个功能 Go 文件、5 行增删，不足时在提交和推送前拒绝；
 - 在 `bug<record>_green` 的 G1 上追加一个 G2，G2 同时含模型功能代码修复和 `evaluator/` 验收文件；
 - 从 G1 文件树创建无父提交的 `bug<record>_red` R1，再加入同一份验收文件；
 - 硬校验 green 恰好两个提交、red 恰好一个提交、两分支无共同祖先、G1/R1 非测试文件逐 blob 一致、G2/R1 验收文件逐 blob 一致；
@@ -632,7 +635,7 @@ python3 <skill>/scripts/post_qc.py --root . --workers 3
 只读、不改产物。逐条输出 ✅/❌，最终汇总；有任何一条不合格就退出码非 0。校验项：
 
 1. **runtime**：核对 preflight 与 Docker 留存的 build、回归和 20/20 红绿证据及输入指纹，默认不重复执行；排障时加 `--recheck-runtime` 显式复跑；
-2. **scope**：bugfix 的 gold 至少改动 1 个功能 Go 文件、功能代码增删总行数至少 5 行；达到最低值后仍由故障链证据判断难度；
+2. **scope**：bugfix 同时复核 gold 相对 Bug 基线、模型最终 G2 相对 G1 两份功能 Go diff；两者都必须至少 1 个文件、5 行增删；
 5. **privacy**：目标测试只存在 `evaluator/`，`env/` 和初始 Bug 基线中不存在；
 6. **files**：`<session_id>.jsonl` / `project_summary.txt` / `collection.json` 齐全，记录目录不含 `BUG_REPRO.md`；
 7. **fields**：`collection.json` 必填字段齐全；

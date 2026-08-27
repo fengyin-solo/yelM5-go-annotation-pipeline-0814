@@ -29,6 +29,11 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from serial_lock import test_model_lock  # noqa: E402
+from change_scope import (  # noqa: E402
+    MIN_FUNCTIONAL_CHANGED_LINES,
+    functional_go_diff_dirs,
+    meets_minimum_functional_change,
+)
 from contract_coverage import validate_manifest  # noqa: E402
 from trajectory_acceptance import run_acceptance  # noqa: E402
 from user_query_rules import user_query_go_version_issues  # noqa: E402
@@ -155,6 +160,16 @@ def validate_task(env: Path, snapshot: Path | None, task_type: str) -> list[str]
         changed = env_changed(env, snapshot)
         if not changed:
             issues.append("bugfix 没有业务文件改动")
+        elif snapshot and snapshot.exists():
+            changed_files, changed_lines = functional_go_diff_dirs(snapshot, env)
+            if not meets_minimum_functional_change(changed_files, changed_lines):
+                issues.append(
+                    f"bugfix 模型最终补丁只有 {changed_files} 个功能 Go 文件、"
+                    f"{changed_lines} 行增删；至少需要 1 个文件、"
+                    f"{MIN_FUNCTIONAL_CHANGED_LINES} 行"
+                )
+        else:
+            issues.append("bugfix 缺少基线快照，无法核验模型最终补丁至少 5 行")
     elif task_type == "diagnosis":
         changed = env_changed(env, snapshot)
         if changed:

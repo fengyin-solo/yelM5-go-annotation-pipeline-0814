@@ -51,7 +51,10 @@ class RepositoryTopologyTest(unittest.TestCase):
             manifest = project / "_delivery" / "g1_snapshot.json"
             write_source_manifest(repo, manifest, commit=g1, branch="bug001_green")
 
-            (repo / "service.go").write_text("package demo\n\nfunc Value() int { return 2 }\n", encoding="utf-8")
+            (repo / "service.go").write_text(
+                "package demo\n\nfunc Value() int {\n\tvalue := 1\n\tvalue++\n\treturn value\n}\n",
+                encoding="utf-8",
+            )
             test_text = "package demo\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) {}\n"
             (repo / "service_test.go").write_text(test_text, encoding="utf-8")
             self.run_git(repo, "add", ".")
@@ -93,6 +96,21 @@ class RepositoryTopologyTest(unittest.TestCase):
             ok, message = repository_delivery_ok(project, collection, "bugfix")
             self.assertTrue(ok, message)
             self.assertNotEqual(0, self.run_git(repo, "merge-base", "bug001_green", "bug001_red", check=False).returncode)
+
+            self.run_git(repo, "checkout", "bug001_green")
+            (repo / "service.go").write_text(
+                "package demo\n\nfunc Value() int { return 2 }\n", encoding="utf-8"
+            )
+            self.run_git(repo, "add", "service.go")
+            self.run_git(repo, "commit", "--amend", "-m", "G2 too small")
+            small_g2 = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+            self.run_git(repo, "push", "--force", "origin", "bug001_green")
+            metadata = json.loads((evidence / "repository_delivery.json").read_text(encoding="utf-8"))
+            metadata["g2_commit"] = small_g2
+            (evidence / "repository_delivery.json").write_text(json.dumps(metadata), encoding="utf-8")
+            ok, message = repository_delivery_ok(project, collection, "bugfix")
+            self.assertFalse(ok)
+            self.assertIn("模型最终补丁只有 1 个功能 Go 文件、2 行增删", message)
 
     def test_diagnosis_single_red_passes_repository_qc_without_bug_repro(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +340,14 @@ class RepositoryTopologyTest(unittest.TestCase):
                 },
             }), encoding="utf-8")
             (project / "sid.jsonl").write_text("{}\n", encoding="utf-8")
+            with patch.object(github_project, "load_context", return_value=context):
+                with self.assertRaisesRegex(RuntimeError, "模型最终补丁只有 1 个功能 Go 文件、2 行增删"):
+                    github_project.cmd_finalize(args)
+
+            (env / "service.go").write_text(
+                "package demo\n\nfunc Value() int {\n\tvalue := 1\n\tvalue++\n\treturn value\n}\n",
+                encoding="utf-8",
+            )
             with patch.object(github_project, "load_context", return_value=context):
                 github_project.cmd_finalize(args)
 

@@ -59,3 +59,4 @@
 2026-08-26 bug_id 身份规则修正：前缀固定取 --root 批次根目录 basename，三位序号取记录目录 __NNN；workspace、收集表和 post_qc 禁止再从 repo/仓库名或记录目录主体派生。
 2026-08-26 增加标注平台批末提交：post_qc 全绿后按本次 bug_id/session_id 选行，TLS 1.2 登录，逐条原子台账防重/断点恢复，支持 --skip-platform-submit。
 2026-08-26 bugfix 最低功能代码改动由 1 行提高到 5 行：batch preflight 与 post-QC 共用同一阈值，4 行拒绝、5 行放行；文件数仍至少为 1，难度继续由真实故障链判断。
+2026-08-27 修复 5 行门禁只检查 gold 的漏洞：正式轨迹验收、finalize 和 post-QC 均新增模型最终补丁相对 G1 的独立 5 行功能 Go 代码门禁；preflight gate version 升至 5，旧缓存不得复用。

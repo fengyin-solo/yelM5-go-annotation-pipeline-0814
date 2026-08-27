@@ -16,7 +16,11 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_state import atomic_json, input_fingerprint, iter_projects, load_json, now, update_status  # noqa: E402
-from change_scope import MIN_FUNCTIONAL_CHANGED_LINES, meets_minimum_functional_change  # noqa: E402
+from change_scope import (  # noqa: E402
+    MIN_FUNCTIONAL_CHANGED_LINES,
+    functional_go_diff_dirs,
+    meets_minimum_functional_change,
+)
 from contract_coverage import validate_manifest  # noqa: E402
 from difficulty_review import validate_review  # noqa: E402
 from trajectory_guard import copy_without_tests, inject_evaluator, private_test_issues  # noqa: E402
@@ -24,7 +28,7 @@ from user_query_rules import user_query_go_version_issues  # noqa: E402
 from project_summary import read_project_summary  # noqa: E402
 from verify_cmds import CONCURRENCY_CATEGORY, validate_concurrency_metadata, validate_verify_cmds  # noqa: E402
 
-PREFLIGHT_GATE_VERSION = 4
+PREFLIGHT_GATE_VERSION = 5
 
 
 def run(command, cwd: Path, *, env=None, timeout=1800, shell=False) -> subprocess.CompletedProcess:
@@ -250,20 +254,7 @@ def _run_ablation(project: Path, gold: Path, evaluator: Path, verify_cmd: str,
 
 
 def _functional_diff(env: Path, gold: Path) -> tuple[int, int]:
-    result = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--no-index", "--numstat",
-                             str(env), str(gold)],
-                            capture_output=True, text=True)
-    files = lines = 0
-    for row in result.stdout.splitlines():
-        parts = row.split("\t")
-        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
-            continue
-        name = parts[2].lower()
-        if not name.endswith(".go") or name.endswith("_test.go"):
-            continue
-        files += 1
-        lines += int(parts[0]) + int(parts[1])
-    return files, lines
+    return functional_go_diff_dirs(env, gold)
 
 
 def preflight_project(project: Path, root: Path, *, calibration_runs: int = 20,
