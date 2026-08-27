@@ -227,7 +227,8 @@ def project_tests(proj: Path) -> set[str]:
 def functional_diff_scope(buggy: Path, gold: Path) -> tuple[int, int]:
     """返回 gold 修复涉及的功能文件数和增删总行数。"""
     r = subprocess.run(
-        ["git", "diff", "--no-index", "--numstat", str(buggy), str(gold)],
+        ["git", "-c", "core.quotePath=false", "diff", "--no-index", "--numstat",
+         str(buggy), str(gold)],
         capture_output=True, text=True,
     )
     files = 0

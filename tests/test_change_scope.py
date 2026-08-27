@@ -23,11 +23,11 @@ class ChangeScopeTest(unittest.TestCase):
 
     def test_preflight_and_post_qc_count_five_added_go_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp) / "中文批次"
             buggy = root / "buggy"
             gold = root / "gold"
-            buggy.mkdir()
-            gold.mkdir()
+            buggy.mkdir(parents=True)
+            gold.mkdir(parents=True)
             (buggy / "main.go").write_text("package demo\n", encoding="utf-8")
             (gold / "main.go").write_text(
                 "package demo\n\nvar a = 1\nvar b = 2\nvar c = 3\nvar d = 4\n",
